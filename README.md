@@ -6,7 +6,7 @@ Team:
 
 &#x20;- Luis Gomez
 
-&#x20;- 
+&#x20;- Jackie Perales
 
 
 
