@@ -1,0 +1,138 @@
+.telemetry {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The one loud element: the operator must never mistake a silent feed for a still drone. */
+.link-band {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 1rem 1.25rem;
+  background: var(--neutral-tint);
+  color: var(--ink);
+}
+
+.link-band--live {
+  background: var(--live-tint);
+}
+
+.link-band--stale {
+  background: var(--stale);
+  color: #fff;
+}
+
+.link-band--offline {
+  background: var(--offline);
+  color: #fff;
+}
+
+.link-band__dot {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 50%;
+  background: var(--ink-2);
+}
+
+.link-band--live .link-band__dot {
+  background: var(--live);
+  animation: pulse 1.6s ease-out infinite;
+}
+
+.link-band--stale .link-band__dot,
+.link-band--offline .link-band__dot {
+  background: #fff;
+}
+
+.link-band__title {
+  font-weight: 650;
+  font-size: 1.0625rem;
+}
+
+.link-band__detail {
+  font-size: 0.9375rem;
+  opacity: 0.9;
+}
+
+.link-band__age {
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live) 55%, transparent); }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .link-band--live .link-band__dot {
+    animation: none;
+  }
+}
+
+.readouts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  background: var(--rule);
+  transition: opacity 200ms ease;
+}
+
+/* Six readouts: 3x2 on wide screens, 2x3 on tablets, one column on phones. No empty cells. */
+@media (min-width: 30rem) {
+  .readouts { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 52rem) {
+  .readouts { grid-template-columns: repeat(3, 1fr); }
+}
+
+.readouts--old {
+  opacity: 0.55;
+}
+
+.readout {
+  background: var(--panel);
+  padding: 1.125rem 1.25rem 1.25rem;
+}
+
+.readout__label {
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.readout__value {
+  font-size: clamp(1.5rem, 3vw, 1.875rem);
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  margin-top: 0.125rem;
+  white-space: nowrap;
+}
+
+.readout__value--muted {
+  color: var(--ink-2);
+}
+
+.readout__detail {
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+}
+
+.readouts-empty {
+  padding: 2rem 1.25rem;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+@media (max-width: 36rem) {
+  .link-band {
+    grid-template-columns: auto 1fr;
+  }
+  .link-band__age {
+    grid-column: 2;
+  }
+}
