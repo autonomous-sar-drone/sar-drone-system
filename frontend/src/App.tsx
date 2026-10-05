@@ -1,5 +1,11 @@
+import { DroneViewPanel } from './features/camera/DroneViewPanel';
+import { DetectionsPanel } from './features/detections/DetectionsPanel';
+import { MapPanel } from './features/map/MapPanel';
+import { MissionControls } from './features/mission/MissionControls';
+import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
 import { TelemetryPanel } from './features/telemetry/TelemetryPanel';
 import { useTelemetry } from './features/telemetry/useTelemetry';
+import './dashboard.css';
 
 export default function App() {
   const { reading, status, nowMs } = useTelemetry();
@@ -10,8 +16,13 @@ export default function App() {
         <span className="app-header__mark" aria-hidden="true" />
         <h1>SAR operator console</h1>
       </header>
-      <main className="app-main">
+      <main className="dashboard">
+        <MapPanel />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
+        <MissionStatusPanel />
+        <DroneViewPanel />
+        <DetectionsPanel />
+        <MissionControls />
       </main>
     </>
   );
