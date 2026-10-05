@@ -1,0 +1,191 @@
+/*
+ * Layout from the team sketch:
+ *   map (large, left) | telemetry over mission status | camera over detections
+ *   mission controls across the bottom
+ */
+.dashboard {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'map'
+    'telemetry'
+    'mission'
+    'camera'
+    'detections'
+    'controls';
+}
+
+.dashboard > [style*='grid-area: map'] {
+  min-height: 24rem;
+}
+
+@media (min-width: 48rem) {
+  .dashboard {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      'map        map'
+      'telemetry  camera'
+      'mission    detections'
+      'controls   controls';
+  }
+}
+
+@media (min-width: 75rem) {
+  .dashboard {
+    height: calc(100vh - 3.5rem);
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.2fr) minmax(0, 0.8fr) auto;
+    grid-template-areas:
+      'map  telemetry  camera'
+      'map  mission    detections'
+      'controls controls controls';
+  }
+  .dashboard > [style*='grid-area: map'] {
+    min-height: 0;
+  }
+}
+
+.map-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.map-view {
+  position: absolute;
+  inset: 0;
+}
+
+.map-hint {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  right: 3.5rem;
+  width: fit-content;
+  max-width: calc(100% - 4.25rem);
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-size: 0.875rem;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+  pointer-events: none;
+}
+
+.camera-frame {
+  flex: 1;
+  display: flex;
+  margin: 0.75rem;
+  border: 1.5px dashed var(--rule);
+  border-radius: 8px;
+}
+
+.camera-frame {
+  aspect-ratio: 16 / 9;
+  flex: 0 1 auto;
+  max-height: 100%;
+}
+
+.status-list {
+  padding: 0.25rem 1rem 0.75rem;
+}
+
+.status-list__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.status-list__row:last-child {
+  border-bottom: 0;
+}
+
+.status-list dt {
+  color: var(--ink-2);
+}
+
+.status-list dd {
+  font-weight: 600;
+  text-align: right;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding: 0.75rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+
+.controls__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.controls__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.625rem 0.875rem;
+  border-radius: 8px;
+  border-left: 4px solid var(--offline);
+  background: color-mix(in srgb, var(--offline) 10%, var(--panel));
+}
+
+.controls__error-title {
+  font-weight: 600;
+}
+
+.controls__error-action {
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.controls__hint {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  margin-left: auto;
+}
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn--primary {
+  background: var(--sar-orange);
+  border-color: var(--sar-orange);
+  color: #fff;
+}
+
+.btn--quiet {
+  border-color: transparent;
+  color: var(--ink-2);
+}
+
+.btn--small {
+  padding: 0.25rem 0.625rem;
+  font-size: 0.8125rem;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
