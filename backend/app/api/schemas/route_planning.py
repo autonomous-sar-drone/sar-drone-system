@@ -10,8 +10,8 @@ from app.domain.models.search_area import GeoPoint, SearchArea
 # Request schemas
 
 class GeoPointRequest(BaseModel):
-    latitude_deg: float = Field(validation_alias="latitudeDeg")
-    longitude_deg: float = Field(validation_alias="longitudeDeg")
+    latitude_deg: float = Field(alias="latitudeDeg")
+    longitude_deg: float = Field(alias="longitudeDeg")
 
 
 class SearchAreaRequest(BaseModel):
@@ -19,12 +19,18 @@ class SearchAreaRequest(BaseModel):
 
 
 class PlanningRequest(BaseModel):
-    search_altitude_m: float = Field(validation_alias="searchAltitudeM")
-    lane_spacing_m: float = Field(validation_alias="laneSpacingM")
+    search_altitude_m: float = Field(
+        gt=0,
+        alias="searchAltitudeM",
+    )
+    lane_spacing_m: float = Field(
+        gt=0,
+        alias="laneSpacingM",
+    )
 
 
 class RoutePreviewRequest(BaseModel):
-    search_area: SearchAreaRequest = Field(validation_alias="searchArea")
+    search_area: SearchAreaRequest = Field(alias="searchArea")
     planning: PlanningRequest | None = None
 
 
@@ -34,7 +40,9 @@ class WaypointResponse(BaseModel):
     latitude_deg: float = Field(serialization_alias="latitudeDeg")
     longitude_deg: float = Field(serialization_alias="longitudeDeg")
     altitude_m: float = Field(serialization_alias="altitudeM")
-    altitude_reference: AltitudeReference = Field(serialization_alias="altitudeReference")
+    altitude_reference: AltitudeReference = Field(
+        serialization_alias="altitudeReference"
+    )
 
 
 class RouteResponse(BaseModel):
@@ -42,20 +50,30 @@ class RouteResponse(BaseModel):
 
 
 class RouteMetricsResponse(BaseModel):
-    distance_to_start_m: float = Field(serialization_alias="distanceToStartM")
-    route_distance_m: float = Field(serialization_alias="routeDistanceM")
+    distance_to_start_m: float = Field(
+        serialization_alias="distanceToStartM"
+    )
+    route_distance_m: float = Field(
+        serialization_alias="routeDistanceM"
+    )
 
 
 class PlanningUsedResponse(BaseModel):
-    search_altitude_m: float = Field(serialization_alias="searchAltitudeM")
-    lane_spacing_m: float = Field(serialization_alias="laneSpacingM")
+    search_altitude_m: float = Field(
+        serialization_alias="searchAltitudeM"
+    )
+    lane_spacing_m: float = Field(
+        serialization_alias="laneSpacingM"
+    )
 
 
 class RoutePreviewResponse(BaseModel):
     plan_id: str = Field(serialization_alias="planId")
     route: RouteResponse
     metrics: RouteMetricsResponse
-    planning_used: PlanningUsedResponse = Field(serialization_alias="planningUsed")
+    planning_used: PlanningUsedResponse = Field(
+        serialization_alias="planningUsed"
+    )
 
 
 # Error schemas
@@ -79,18 +97,23 @@ class RoutePreviewErrorResponse(BaseModel):
     detail: RoutePreviewErrorDetail
 
 
-# Request -> domain conversion
+# Request to domain conversion
 
 def search_area_from_request(request: SearchAreaRequest) -> SearchArea:
     return SearchArea(
-            vertices=tuple(
-            GeoPoint(latitude_deg=vertex.latitude_deg, longitude_deg=vertex.longitude_deg)
+        vertices=tuple(
+            GeoPoint(
+                latitude_deg=vertex.latitude_deg,
+                longitude_deg=vertex.longitude_deg,
+            )
             for vertex in request.vertices
         )
     )
 
 
-def planning_settings_from_request(request: PlanningRequest | None) -> PlanningSettings | None:
+def planning_settings_from_request(
+    request: PlanningRequest | None,
+) -> PlanningSettings | None:
     if request is None:
         return None
 
@@ -100,7 +123,9 @@ def planning_settings_from_request(request: PlanningRequest | None) -> PlanningS
     )
 
 
-def route_preview_request_to_domain(request: RoutePreviewRequest) -> tuple[SearchArea, PlanningSettings | None]:
+def route_preview_request_to_domain(
+    request: RoutePreviewRequest,
+) -> tuple[SearchArea, PlanningSettings | None]:
     return (
         search_area_from_request(request.search_area),
         planning_settings_from_request(request.planning),
@@ -109,7 +134,9 @@ def route_preview_request_to_domain(request: RoutePreviewRequest) -> tuple[Searc
 
 # Domain to response conversion
 
-def route_preview_response_from_plan(plan: MissionPlan) -> RoutePreviewResponse:
+def route_preview_response_from_plan(
+    plan: MissionPlan,
+) -> RoutePreviewResponse:
     return RoutePreviewResponse(
         plan_id=plan.plan_id,
         route=RouteResponse(
