@@ -30,7 +30,7 @@ export function TelemetryPanel({ reading, status, nowMs }: Props) {
   const isOld = status === 'stale' || status === 'offline';
 
   return (
-    <section className="telemetry" aria-labelledby="telemetry-heading">
+    <section className="telemetry" style={{ gridArea: 'telemetry' }} aria-labelledby="telemetry-heading">
       <div className={`link-band link-band--${status}`} role="status" aria-live="polite">
         <span className="link-band__dot" aria-hidden="true" />
         <div>

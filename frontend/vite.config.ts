@@ -6,6 +6,8 @@ const backendUrl = process.env.SAR_BACKEND_URL ?? 'http://localhost:8000';
 
 export default defineConfig({
   plugins: [react()],
+  // MapLibre's worker is an ES module; keep it one when Vite bundles it.
+  worker: { format: 'es' },
   server: {
     proxy: {
       // Browser connects to ws://<vite-host>/ws/events; Vite forwards it to the backend.
