@@ -8,10 +8,10 @@ from app.domain.models.route import (
     AltitudeReference,
     Waypoint,
 )
+from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_vehicle import (
     MavlinkVehicle,
     POSITION_ONLY_TYPE_MASK,
-    VehicleCommandError,
 )
 
 

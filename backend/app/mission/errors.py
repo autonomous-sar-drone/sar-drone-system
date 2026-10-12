@@ -20,3 +20,25 @@ class MissionPlanningError(Exception):
         self.code = code
         self.message = message
         self.details = details
+
+
+class MissionExecutionErrorCode(StrEnum):
+    MISSION_ACTION_NOT_ALLOWED = "MISSION_ACTION_NOT_ALLOWED"
+    PLAN_NOT_CURRENT = "PLAN_NOT_CURRENT"
+    EXECUTION_NOT_CURRENT = "EXECUTION_NOT_CURRENT"
+    VEHICLE_POSITION_UNAVAILABLE = "VEHICLE_POSITION_UNAVAILABLE"
+    VEHICLE_NOT_READY = "VEHICLE_NOT_READY"
+    VEHICLE_COMMAND_FAILED = "VEHICLE_COMMAND_FAILED"
+
+
+class MissionExecutionError(Exception):
+    def __init__(
+        self,
+        code: MissionExecutionErrorCode,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details

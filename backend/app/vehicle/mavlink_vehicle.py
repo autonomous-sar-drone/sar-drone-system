@@ -7,16 +7,13 @@ from pymavlink import mavutil
 from app.domain.models.route import AltitudeReference, Waypoint
 from app.domain.models.vehicle_status import VehicleStatus
 from app.runtime.telemetry_hub import TelemetryHub
+from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_telemetry import normalize_global_position_int
 
 
 # SET_POSITION_TARGET_GLOBAL_INT can control position, velocity, acceleration,
 # yaw, and yaw rate. This mask tells ArduPilot to use only lat/lon/altitude.
 POSITION_ONLY_TYPE_MASK = 0b110111111000
-
-
-class VehicleCommandError(RuntimeError):
-    pass
 
 
 def _get_mavlink() -> Any:
