@@ -15,9 +15,13 @@ export default function App() {
 
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
+  const heading = reading?.data.headingDeg ?? null;
   const drone = useMemo(
-    () => (lat !== undefined && lon !== undefined ? { latitudeDeg: lat, longitudeDeg: lon } : null),
-    [lat, lon],
+    () =>
+      lat !== undefined && lon !== undefined
+        ? { latitudeDeg: lat, longitudeDeg: lon, headingDeg: heading }
+        : null,
+    [lat, lon, heading],
   );
 
   return (

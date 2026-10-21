@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Route } from '../../types/routes';
 import type { EditMode } from '../planning/planningState';
 import { canAppendVertex, canClose, type LatLon } from '../searchArea/geometry';
+import { headingSegment, type DronePose } from './headingIndicator';
 import { INITIAL_ZOOM, MAP_COLORS, SNAP_PX, initialCenter, mapStyle } from './mapConfig';
 
 export interface MapViewProps {
@@ -20,7 +21,7 @@ export interface MapViewProps {
   shapeInvalid: boolean;
   /** Read-only. Fed from planning state's currentRoute, never edited here. */
   route: Route | null;
-  drone: LatLon | null;
+  drone: DronePose | null;
   /** Bump to re-center on the drone. */
   centerOnDroneRequest: number;
   onAddVertex: (point: LatLon) => void;
@@ -37,7 +38,7 @@ const toLatLon = (l: maplibregl.LngLat): LatLon => ({ latitudeDeg: l.lat, longit
 const toCoord = (p: LatLon): [number, number] => [p.longitudeDeg, p.latitudeDeg];
 
 /** Each concern is its own source + layers so later coverage/trail layers slot in beside them. */
-const SOURCES = ['search-area', 'route', 'draw-preview', 'vertices', 'drone'] as const;
+const SOURCES = ['search-area', 'route', 'draw-preview', 'vertices', 'drone-heading', 'drone'] as const;
 
 function addLayers(map: maplibregl.Map) {
   for (const id of SOURCES) map.addSource(id, { type: 'geojson', data: EMPTY });
@@ -104,6 +105,17 @@ function addLayers(map: maplibregl.Map) {
       'circle-stroke-color': MAP_COLORS.area,
       'circle-stroke-width': 2.5,
     },
+  });
+  // Heading stick, drawn under the marker so the circle stays the position of record.
+  map.addLayer({
+    id: 'drone-heading-casing', type: 'line', source: 'drone-heading',
+    layout: { 'line-cap': 'round' },
+    paint: { 'line-color': MAP_COLORS.casing, 'line-width': 6 },
+  });
+  map.addLayer({
+    id: 'drone-heading', type: 'line', source: 'drone-heading',
+    layout: { 'line-cap': 'round' },
+    paint: { 'line-color': MAP_COLORS.droneHeading, 'line-width': 3 },
   });
   map.addLayer({
     id: 'drone', type: 'circle', source: 'drone',
@@ -346,6 +358,17 @@ export function MapView(props: MapViewProps) {
     if (!map || !ready) return;
     setData(map, 'drone', drone
       ? { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: toCoord(drone) } }] }
+      : EMPTY);
+    // Unknown heading leaves this empty rather than pointing the operator an arbitrary way.
+    const segment = drone ? headingSegment(drone) : null;
+    setData(map, 'drone-heading', segment
+      ? {
+          type: 'FeatureCollection',
+          features: [{
+            type: 'Feature', properties: {},
+            geometry: { type: 'LineString', coordinates: segment.map(toCoord) },
+          }],
+        }
       : EMPTY);
     // First fix: bring the drone into view, but never move the map under an operator who has
     // already panned or is planning (a jump mid-drawing would shift every vertex on screen).
