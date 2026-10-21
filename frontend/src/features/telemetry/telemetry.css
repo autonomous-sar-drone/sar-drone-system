@@ -1,0 +1,149 @@
+.telemetry {
+  container-type: inline-size;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The one loud element: the operator must never mistake a silent feed for a still drone. */
+.link-band {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.75rem 1rem;
+  background: var(--neutral-tint);
+  color: var(--ink);
+}
+
+.link-band--live {
+  background: var(--live-tint);
+}
+
+.link-band--stale {
+  background: var(--stale);
+  color: #fff;
+}
+
+.link-band--offline {
+  background: var(--offline);
+  color: #fff;
+}
+
+.link-band__dot {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 50%;
+  background: var(--ink-2);
+}
+
+.link-band--live .link-band__dot {
+  background: var(--live);
+  animation: pulse 1.6s ease-out infinite;
+}
+
+.link-band--stale .link-band__dot,
+.link-band--offline .link-band__dot {
+  background: #fff;
+}
+
+.link-band__title {
+  font-weight: 650;
+  font-size: 1.0625rem;
+}
+
+.link-band__detail {
+  font-size: 0.875rem;
+  opacity: 0.9;
+}
+
+.link-band__age {
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live) 55%, transparent); }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .link-band--live .link-band__dot {
+    animation: none;
+  }
+}
+
+.readouts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  background: var(--rule);
+  transition: opacity 200ms ease;
+}
+
+/* Six readouts sized to the panel, not the window: 1, 2 or 3 columns, never an empty cell. */
+@container (min-width: 22rem) {
+  .readouts { grid-template-columns: repeat(2, 1fr); }
+}
+@container (min-width: 44rem) {
+  .readouts { grid-template-columns: repeat(3, 1fr); }
+}
+
+.readouts--old {
+  opacity: 0.55;
+}
+
+.readout {
+  background: var(--panel);
+  padding: 0.75rem 1rem;
+}
+
+.readout__label {
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.readout__value {
+  font-size: clamp(1.0625rem, 5cqi, 1.5rem);
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  margin-top: 0.125rem;
+  white-space: nowrap;
+}
+
+.readout__value--muted {
+  color: var(--ink-2);
+}
+
+.readout__detail {
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+}
+
+.readouts-empty {
+  padding: 2rem 1.25rem;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+@container (max-width: 30rem) {
+  .link-band {
+    grid-template-columns: auto 1fr;
+    row-gap: 0.125rem;
+  }
+  .link-band__age {
+    grid-column: 2;
+    font-size: 0.8125rem;
+  }
+  /* In a narrow panel, only explain the states that need action. */
+  .link-band--live .link-band__detail,
+  .link-band--connecting .link-band__detail {
+    display: none;
+  }
+}
