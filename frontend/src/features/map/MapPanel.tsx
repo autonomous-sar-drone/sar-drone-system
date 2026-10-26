@@ -2,14 +2,14 @@ import { useState, type Dispatch } from 'react';
 import { Panel } from '../../components/Panel';
 import type { Route } from '../../types/routes';
 import { editMode, localIssue, type PlanningAction, type PlanningState } from '../planning/planningState';
-import type { LatLon } from '../searchArea/geometry';
+import type { DronePose } from './headingIndicator';
 import { MapView } from './MapView';
 
 interface Props {
   planning: PlanningState;
   dispatch: Dispatch<PlanningAction>;
   route: Route | null;
-  drone: LatLon | null;
+  drone: DronePose | null;
 }
 
 function hint(planning: PlanningState): string | null {

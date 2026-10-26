@@ -1,4 +1,4 @@
-import type { EventMessage } from '../types/telemetry';
+import type { EventMessage } from '../types/events';
 import { parseEvent } from './parseEvent';
 
 export type SocketState = 'connecting' | 'open' | 'closed';

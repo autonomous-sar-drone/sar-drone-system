@@ -22,13 +22,6 @@ export interface TelemetryUpdateMessage {
   data: TelemetryData;
 }
 
-/**
- * Every message type the frontend currently understands.
- * mission_update, coverage_update and detection_update join this union
- * when those slices are implemented.
- */
-export type EventMessage = TelemetryUpdateMessage;
-
 /** A telemetry sample plus what the browser knows about when it arrived. */
 export interface TelemetryReading {
   data: TelemetryData;

@@ -4,20 +4,26 @@ import { DetectionsPanel } from './features/detections/DetectionsPanel';
 import { MapPanel } from './features/map/MapPanel';
 import { MissionControls } from './features/mission/MissionControls';
 import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
+import { useMissionCommands } from './features/mission/useMissionCommands';
 import { usePlanning } from './features/planning/usePlanning';
 import { TelemetryPanel } from './features/telemetry/TelemetryPanel';
-import { useTelemetry } from './features/telemetry/useTelemetry';
+import { useEvents } from './features/events/useEvents';
 import './dashboard.css';
 
 export default function App() {
-  const { reading, status, nowMs } = useTelemetry();
+  const { reading, status, nowMs, mission } = useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
+  const commands = useMissionCommands();
 
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
+  const heading = reading?.data.headingDeg ?? null;
   const drone = useMemo(
-    () => (lat !== undefined && lon !== undefined ? { latitudeDeg: lat, longitudeDeg: lon } : null),
-    [lat, lon],
+    () =>
+      lat !== undefined && lon !== undefined
+        ? { latitudeDeg: lat, longitudeDeg: lon, headingDeg: heading }
+        : null,
+    [lat, lon, heading],
   );
 
   return (
@@ -29,10 +35,16 @@ export default function App() {
       <main className="dashboard">
         <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
-        <MissionStatusPanel planning={planning} />
+        <MissionStatusPanel planning={planning} mission={mission} />
         <DroneViewPanel />
         <DetectionsPanel />
-        <MissionControls planning={planning} dispatch={dispatch} onGenerate={generate} />
+        <MissionControls
+          planning={planning}
+          dispatch={dispatch}
+          onGenerate={generate}
+          mission={mission}
+          commands={commands}
+        />
       </main>
     </>
   );
