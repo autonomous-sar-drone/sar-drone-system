@@ -1,9 +1,13 @@
 import { Panel } from '../../components/Panel';
+import type { MissionUpdateData } from '../../types/mission';
 import { formatArea, formatMeters } from '../planning/format';
 import { editMode, localIssue, type PlanningState } from '../planning/planningState';
 import { polygonAreaM2 } from '../searchArea/geometry';
+import { MISSION_STATE_COPY } from './missionCopy';
 
-function missionLabel(s: PlanningState): string {
+// The backend is authoritative once an execution exists; local phase only fills the gap before.
+function missionLabel(s: PlanningState, mission: MissionUpdateData | null): string {
+  if (mission) return MISSION_STATE_COPY[mission.missionState].label;
   if (s.phase === 'IDLE') return 'Not started';
   if (s.phase !== 'PLANNING') return s.phase.replace('_', ' ').toLowerCase();
   return s.plan ? 'Plan ready' : 'Planning';
@@ -24,12 +28,24 @@ function routeLabel(s: PlanningState): string {
   return editMode(s) === 'none' ? 'Not generated' : 'Not generated yet';
 }
 
-export function MissionStatusPanel({ planning }: { planning: PlanningState }) {
+interface Props {
+  planning: PlanningState;
+  mission: MissionUpdateData | null;
+}
+
+export function MissionStatusPanel({ planning, mission }: Props) {
   const rows: Array<[string, string]> = [
-    ['Mission', missionLabel(planning)],
+    ['Mission', missionLabel(planning, mission)],
     ['Search area', areaLabel(planning)],
     ['Route', routeLabel(planning)],
   ];
+  if (mission?.activeTarget) {
+    const t = mission.activeTarget;
+    rows.push([
+      'Flying to',
+      `${t.latitudeDeg.toFixed(5)}, ${t.longitudeDeg.toFixed(5)} at ${t.altitudeM.toFixed(0)} m`,
+    ]);
+  }
   if (planning.plan) {
     const { metrics, planningUsed } = planning.plan;
     rows.push(
