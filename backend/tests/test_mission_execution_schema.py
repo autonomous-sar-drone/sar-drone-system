@@ -7,6 +7,7 @@ from app.domain.models.mission_state import MissionState
 from app.domain.models.route import AltitudeReference, Waypoint
 
 
+# the frontend sends planId, even though the Python field is plan_id
 def test_commence_request_accepts_frontend_plan_id() -> None:
     request = CommenceMissionRequest.model_validate(
         {
@@ -17,6 +18,7 @@ def test_commence_request_accepts_frontend_plan_id() -> None:
     assert request.plan_id == "plan-123"
 
 
+# serialization should keep camelCase and the home-relative altitude label
 def test_execution_response_matches_frontend_contract() -> None:
     execution = MissionExecution(
         execution_id="execution-456",
@@ -45,6 +47,7 @@ def test_execution_response_matches_frontend_contract() -> None:
     }
 
 
+# returning home no longer has a search target, so null is expected
 def test_execution_response_allows_no_active_target() -> None:
     execution = MissionExecution(
         execution_id="execution-456",

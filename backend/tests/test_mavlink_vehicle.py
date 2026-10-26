@@ -64,6 +64,7 @@ class FakeConnection:
             "GUIDED": 4,
             "LOITER": 5,
             "RTL": 6,
+            "BRAKE": 17,
         }
 
     def set_mode(self, mode_id: int) -> None:
@@ -78,8 +79,12 @@ class FakeHeartbeat:
         self,
         mode_name: str,
         armed: bool = False,
+        src_system: int = 1,
+        src_component: int = 1,
     ) -> None:
         self.mode_name = mode_name
+        self.src_system = src_system
+        self.src_component = src_component
 
         if armed:
             self.base_mode = (
@@ -90,6 +95,12 @@ class FakeHeartbeat:
 
     def get_type(self) -> str:
         return "HEARTBEAT"
+
+    def get_srcSystem(self) -> int:
+        return self.src_system
+
+    def get_srcComponent(self) -> int:
+        return self.src_component
 
 
 class FakeCommandAck:
@@ -122,8 +133,7 @@ class FakeGlobalPositionInt:
 def fake_mode_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Real mode_string_v10 understands actual MAVLink heartbeat fields.
-    # Tests use a simpler explicit mode_name property.
+    # fake heartbeats use mode_name instead of parsing full MAVLink mode bits
     monkeypatch.setattr(
         mavutil,
         "mode_string_v10",
@@ -169,6 +179,49 @@ async def test_heartbeat_updates_vehicle_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ground_station_heartbeat_does_not_fake_a_disarm() -> None:
+    vehicle, _, _ = make_vehicle()
+
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    aircraft_heartbeat_time = vehicle.get_status().last_heartbeat_utc
+
+    # forwarded MAVProxy heartbeats may look disarmed, but are not the vehicle
+    await vehicle._dispatch_message(
+        FakeHeartbeat("UNKNOWN", armed=False, src_system=255, src_component=230)
+    )
+
+    status = vehicle.get_status()
+    assert status.armed is True
+    assert status.flight_mode == "GUIDED"
+    assert status.last_heartbeat_utc == aircraft_heartbeat_time
+
+
+@pytest.mark.asyncio
+# non-autopilot components from the same system should not override aircraft mode
+async def test_other_component_heartbeat_does_not_override_autopilot() -> None:
+    vehicle, _, _ = make_vehicle()
+
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    await vehicle._dispatch_message(
+        FakeHeartbeat("UNKNOWN", armed=False, src_system=1, src_component=100)
+    )
+
+    assert vehicle.get_status().armed is True
+    assert vehicle.get_status().flight_mode == "GUIDED"
+
+
+@pytest.mark.asyncio
+async def test_real_autopilot_disarm_is_still_detected() -> None:
+    vehicle, _, _ = make_vehicle()
+
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=False))
+
+    assert vehicle.get_status().armed is False
+
+
+@pytest.mark.asyncio
+# checks MAVLink positions reach the telemetry hub in the expected units
 async def test_global_position_is_published_as_telemetry() -> None:
     vehicle, _, hub = make_vehicle()
 
@@ -233,8 +286,7 @@ async def test_arm_waits_for_ack_and_armed_heartbeat() -> None:
 
     await asyncio.sleep(0)
 
-    # An accepted command is not enough. arm() remains pending until a
-    # heartbeat confirms that the vehicle actually reports itself armed.
+    # the ACK alone does not finish arming, the heartbeat has to show armed
     assert arm_task.done() is False
 
     await vehicle._dispatch_message(
@@ -282,7 +334,7 @@ async def test_rejected_command_raises_vehicle_error() -> None:
 async def test_takeoff_requires_guided_and_armed_vehicle() -> None:
     vehicle, _, _ = make_vehicle()
 
-    # Armed alone is not sufficient if Copter is not in GUIDED.
+    # takeoff needs both the right mode and armed status
     await vehicle._dispatch_message(
         FakeHeartbeat(
             mode_name="LOITER",
@@ -296,7 +348,7 @@ async def test_takeoff_requires_guided_and_armed_vehicle() -> None:
     ):
         await vehicle.takeoff(25.0)
 
-    # GUIDED alone is also not sufficient before the vehicle is armed.
+    # GUIDED without arming is still not ready for takeoff
     await vehicle._dispatch_message(
         FakeHeartbeat(
             mode_name="GUIDED",
@@ -341,8 +393,7 @@ async def test_takeoff_sends_command_when_vehicle_is_ready() -> None:
         == MAVLINK.MAV_CMD_NAV_TAKEOFF
     )
 
-    # command_long_send stores target system/component, command,
-    # confirmation, and then MAVLink params 1-7. Altitude is param7.
+    # MAVLink takeoff altitude is param7 in the command_long message
     assert command_call[10] == pytest.approx(25.0)
 
     await vehicle._dispatch_message(
@@ -356,6 +407,7 @@ async def test_takeoff_sends_command_when_vehicle_is_ready() -> None:
 
 
 @pytest.mark.asyncio
+# waypoint commands should send only position, not velocity or yaw targets
 async def test_go_to_sends_guided_position_target() -> None:
     vehicle, connection, _ = make_vehicle()
 
@@ -421,7 +473,7 @@ async def test_go_to_requires_guided_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hold_waits_for_loiter_confirmation() -> None:
+async def test_hold_waits_for_brake_confirmation() -> None:
     vehicle, connection, _ = make_vehicle()
 
     await vehicle._dispatch_message(
@@ -435,21 +487,19 @@ async def test_hold_waits_for_loiter_confirmation() -> None:
 
     await asyncio.sleep(0)
 
-    assert connection.set_mode_calls == [5]
+    assert connection.set_mode_calls == [17]
 
-    # The request alone should not count as a successful transition.
+    # hold stays pending until the aircraft actually reports BRAKE
+    assert hold_task.done() is False
+    await vehicle._dispatch_message(FakeHeartbeat("LOITER", armed=True))
     assert hold_task.done() is False
 
     await vehicle._dispatch_message(
-        FakeHeartbeat(
-            mode_name="LOITER",
-            armed=True,
-        )
+        FakeHeartbeat(mode_name="BRAKE", armed=True)
     )
 
     await hold_task
-
-    assert vehicle.get_status().flight_mode == "LOITER"
+    assert vehicle.get_status().flight_mode == "BRAKE"
 
 
 @pytest.mark.asyncio
@@ -471,8 +521,7 @@ async def test_rtl_waits_for_vehicle_mode_confirmation() -> None:
 
     assert connection.set_mode_calls == [6]
 
-    # Mission code must not treat the vehicle as returning home just because
-    # the RTL request was sent.
+    # requesting RTL is not enough, a heartbeat must confirm the mode
     assert rtl_task.done() is False
 
     await vehicle._dispatch_message(

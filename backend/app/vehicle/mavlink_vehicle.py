@@ -11,15 +11,14 @@ from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_telemetry import normalize_global_position_int
 
 
-# SET_POSITION_TARGET_GLOBAL_INT can control position, velocity, acceleration,
-# yaw, and yaw rate. This mask tells ArduPilot to use only lat/lon/altitude.
+# the position target message has several optional controls
+# this mask uses only latitude, longitude, and altitude
 POSITION_ONLY_TYPE_MASK = 0b110111111000
 
 
 def _get_mavlink() -> Any:
-    # pymavlink types mavutil.mavlink as possibly None even though it should
-    # normally be initialized after the connection is created. Keep the check
-    # here so the rest of this module can safely access MAVLink constants.
+    # pymavlink can mark the MAVLink constants as optional
+    # check once here before using them in vehicle commands
     mavlink = mavutil.mavlink
 
     if mavlink is None:
@@ -41,25 +40,21 @@ class MavlinkVehicle:
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._command_timeout_s = command_timeout_s
 
-        # Sequence belongs to this running backend telemetry stream rather than
-        # the raw MAVLink packet numbering.
+        # telemetry sequences are local to this backend, not MAVLink packet numbers
         self._telemetry_sequence = 0
 
-        # Heartbeats maintain the latest reported aircraft status.
+        # aircraft heartbeat data is used for mode and armed status
         self._armed = False
         self._flight_mode: str | None = None
         self._last_heartbeat_utc: datetime | None = None
 
-        # Status waiters use this condition to sleep until a heartbeat reports
-        # a relevant state change, such as becoming armed or entering RTL.
+        # command waits wake up when a heartbeat reports a mode or arm change
         self._status_condition = asyncio.Condition()
 
-        # Commands are serialized for the MVP so mode/command transitions do
-        # not overlap and create ambiguous aircraft state.
+        # one command at a time avoids overlapping aircraft mode transitions
         self._command_lock = asyncio.Lock()
 
-        # COMMAND_ACK messages arrive through the shared receive loop. A
-        # waiting command temporarily registers its own queue under command ID.
+        # ACKs arrive on the shared receiver and are routed to the waiting command
         self._pending_command_acks: dict[int, asyncio.Queue[Any]] = {}
 
         self._receive_task: asyncio.Task[None] | None = None
@@ -73,8 +68,7 @@ class MavlinkVehicle:
                 datetime.now(timezone.utc) - self._last_heartbeat_utc
             ).total_seconds()
 
-            # "Connected" is based on recent evidence from the vehicle rather
-            # than a flag that stays true forever after the first heartbeat.
+            # connected depends on a recent aircraft heartbeat, not just one at startup
             connected = heartbeat_age_s <= self._heartbeat_timeout_s
 
         return VehicleStatus(
@@ -88,8 +82,7 @@ class MavlinkVehicle:
         if self._receive_task is not None:
             return
 
-        # Before the shared receiver exists, wait_heartbeat can safely read
-        # directly from the MAVLink connection.
+        # before the receiver starts, the initial heartbeat is read directly
         heartbeat = await asyncio.to_thread(
             self._connection.wait_heartbeat,
             timeout=self._heartbeat_timeout_s,
@@ -100,8 +93,7 @@ class MavlinkVehicle:
 
         await self._handle_heartbeat(heartbeat)
 
-        # From this point onward, _receive_loop is the single owner of
-        # recv_match(). Other methods receive messages through dispatching.
+        # after startup the receiver is the only code calling recv_match
         self._stop_requested = False
         self._receive_task = asyncio.create_task(self._receive_loop())
 
@@ -110,8 +102,7 @@ class MavlinkVehicle:
                 telemetry_rate_hz
             )
         except Exception:
-            # Do not leave a background receiver or connection running when
-            # startup only partially succeeds.
+            # close the receiver and connection if startup fails partway through
             await self.stop()
             raise
 
@@ -121,13 +112,12 @@ class MavlinkVehicle:
         try:
             if self._receive_task is not None:
                 try:
-                    # recv_match has a short timeout, so the loop will notice
-                    # _stop_requested and exit without needing forced teardown.
+                    # the short receive timeout lets shutdown exit normally
                     await self._receive_task
                 finally:
                     self._receive_task = None
         finally:
-            # The connection still closes if the receive task itself failed.
+            # close the connection even if the receiver task raised an error
             self._connection.close()
 
     async def set_guided(self) -> None:
@@ -151,8 +141,7 @@ class MavlinkVehicle:
             ),
         )
 
-        # COMMAND_ACK only confirms that ArduPilot accepted the request.
-        # Wait for a heartbeat to confirm the resulting vehicle state.
+        # an accepted command is not the same as a confirmed vehicle mode or state
         await self._wait_for_armed(True)
 
     async def takeoff(self, altitude_m: float) -> None:
@@ -163,8 +152,7 @@ class MavlinkVehicle:
                 "Takeoff altitude must be greater than zero"
             )
 
-        # These are technical requirements of the vehicle command, not mission
-        # workflow policy, so the Vehicle layer protects them directly.
+        # takeoff itself requires GUIDED and armed, regardless of mission flow
         if self._flight_mode != "GUIDED":
             raise VehicleCommandError(
                 "Vehicle must be in GUIDED mode before takeoff"
@@ -190,8 +178,7 @@ class MavlinkVehicle:
             ),
         )
 
-        # This method confirms command acceptance only. Mission execution will
-        # use telemetry to determine when the aircraft actually reaches altitude.
+        # takeoff ACK means the command was accepted, not that altitude was reached
 
     async def go_to(self, target: Waypoint) -> None:
         self._ensure_connected()
@@ -213,8 +200,7 @@ class MavlinkVehicle:
 
         mavlink = _get_mavlink()
 
-        # This sets the aircraft's current GUIDED target. It does not wait for
-        # arrival; MissionService determines target completion from telemetry.
+        # send the GUIDED position target, arrival is checked by MissionService
         self._connection.mav.set_position_target_global_int_send(
             0,  # boot-time field is unused for this command
             self._connection.target_system,
@@ -235,19 +221,18 @@ class MavlinkVehicle:
         )
 
     async def hold(self) -> None:
-        # Pause behavior is implemented as LOITER so the vehicle holds position.
-        await self._set_mode_and_wait("LOITER")
+        # BRAKE holds position without needing pilot throttle input
+        # wait for the heartbeat to confirm the mode actually changed
+        await self._set_mode_and_wait("BRAKE")
 
     async def return_to_launch(self) -> None:
-        # Success means a heartbeat has actually reported RTL, not merely that
-        # the backend attempted to request the mode.
+        # RTL is confirmed by heartbeat, not just by requesting the mode
         await self._set_mode_and_wait("RTL")
 
     async def _receive_loop(self) -> None:
         while not self._stop_requested:
-            # This is intentionally the only runtime recv_match consumer.
-            # Receive every message and dispatch by type instead of creating
-            # competing telemetry, heartbeat, and command readers.
+            # one runtime reader handles telemetry, heartbeats, and command ACKs
+            # multiple readers could grab messages meant for each other
             message = await asyncio.to_thread(
                 self._connection.recv_match,
                 blocking=True,
@@ -270,8 +255,7 @@ class MavlinkVehicle:
                 self._telemetry_sequence,
             )
 
-            # TelemetryHub remains the application-level source of current
-            # normalized vehicle position.
+            # publish position in the shared format used by the rest of the backend
             await self._telemetry_hub.publish(sample)
             return
 
@@ -285,6 +269,14 @@ class MavlinkVehicle:
     async def _handle_heartbeat(self, message: Any) -> None:
         mavlink = _get_mavlink()
 
+        # forwarded streams can include MAVProxy and other component heartbeats
+        # only the autopilot heartbeat should determine armed status and mode
+        if (
+            message.get_srcSystem() != self._connection.target_system
+            or message.get_srcComponent() != mavlink.MAV_COMP_ID_AUTOPILOT1
+        ):
+            return
+
         armed = bool(
             message.base_mode
             & mavlink.MAV_MODE_FLAG_SAFETY_ARMED
@@ -297,7 +289,7 @@ class MavlinkVehicle:
             self._flight_mode = flight_mode
             self._last_heartbeat_utc = datetime.now(timezone.utc)
 
-            # Wake any command currently waiting for a reported status change.
+            # notify commands waiting for an arm or mode change
             self._status_condition.notify_all()
 
     def _handle_command_ack(self, message: Any) -> None:
@@ -305,8 +297,7 @@ class MavlinkVehicle:
         queue = self._pending_command_acks.get(command)
 
         if queue is not None:
-            # Queueing keeps the shared receiver independent from whichever
-            # coroutine originally sent this command.
+            # dispatch ACKs to the command waiting for this ID
             queue.put_nowait(message)
 
     async def _request_global_position_interval(
@@ -320,7 +311,7 @@ class MavlinkVehicle:
 
         mavlink = _get_mavlink()
 
-        # MAV_CMD_SET_MESSAGE_INTERVAL expects the interval in microseconds.
+        # this MAVLink command expects the interval in microseconds
         interval_us = int(1_000_000 / rate_hz)
 
         await self._send_command_long_and_wait(
@@ -358,8 +349,7 @@ class MavlinkVehicle:
         async with self._command_lock:
             ack_queue: asyncio.Queue[Any] = asyncio.Queue()
 
-            # Register before sending so a fast ACK cannot arrive before the
-            # receiver knows which waiter should receive it.
+            # register the waiter first, a fast ACK could arrive immediately
             self._pending_command_acks[command] = ack_queue
 
             try:
@@ -371,7 +361,7 @@ class MavlinkVehicle:
                     *params,
                 )
 
-                # Use the event loop's monotonic clock for timeout accounting.
+                # use the monotonic event-loop clock for command timeouts
                 loop = asyncio.get_running_loop()
                 deadline = (
                     loop.time() + self._command_timeout_s
@@ -397,8 +387,7 @@ class MavlinkVehicle:
                             f"for MAVLink command {command}"
                         ) from exc
 
-                    # Some MAVLink commands can first report IN_PROGRESS and
-                    # later provide a final ACCEPTED or failure result.
+                    # IN_PROGRESS is not final, a later ACK can still succeed or fail
                     if (
                         ack.result
                         == mavlink.MAV_RESULT_IN_PROGRESS
@@ -418,8 +407,7 @@ class MavlinkVehicle:
                     return ack
 
             finally:
-                # Never leave a stale waiter registered after timeout, failure,
-                # cancellation, or successful completion.
+                # remove the waiter after any outcome, including timeout or cancellation
                 self._pending_command_acks.pop(
                     command,
                     None,
@@ -450,8 +438,7 @@ class MavlinkVehicle:
                 mode_mapping[mode_name]
             )
 
-            # set_mode only requests the transition. The heartbeat provides
-            # authoritative confirmation of the vehicle's reported mode.
+            # set_mode sends the request, heartbeat confirms the actual mode
             await self._wait_for_mode(mode_name)
 
     async def _wait_for_mode(
@@ -498,6 +485,7 @@ class MavlinkVehicle:
                 f"Vehicle did not become {expected_state}"
             ) from exc
 
+    # reject new commands if no recent aircraft heartbeat is available
     def _ensure_connected(self) -> None:
         if not self.get_status().connected:
             raise VehicleCommandError(

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.domain.models.mission_execution import MissionExecution
 from app.domain.models.mission_state import MissionState
 from app.domain.models.route import PlanningSettings, Waypoint
 from app.domain.models.search_area import GeoPoint, SearchArea
@@ -10,6 +11,7 @@ from app.domain.models.telemetry import TelemetrySample
 from app.domain.models.vehicle_status import VehicleStatus
 from app.mission.errors import MissionExecutionError, MissionExecutionErrorCode
 from app.mission.mission_service import MissionService
+from app.runtime.mission_hub import MissionHub
 from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.errors import VehicleCommandError
 
@@ -58,7 +60,7 @@ class FakeVehicle:
 
     async def hold(self) -> None:
         self.hold_calls += 1
-        self.flight_mode = "LOITER"
+        self.flight_mode = "BRAKE"
 
     async def return_to_launch(self) -> None:
         self.rtl_calls += 1
@@ -197,7 +199,7 @@ async def test_commence_creates_execution_and_starts_first_target() -> None:
     assert vehicle.takeoff_calls == [25.0]
     assert vehicle.go_to_calls[-1] == plan.route.waypoints[0]
 
-    # The initial ground sample and takeoff sample are both preserved.
+    # keep the initial ground position as well as the takeoff sample in history
     assert [sample.sequence for sample in execution.telemetry_history] == [1, 2]
 
     await service.shutdown()
@@ -251,6 +253,7 @@ async def test_failed_commence_before_arming_restores_planning_state() -> None:
 
 
 @pytest.mark.asyncio
+# BRAKE should hold without clearing the waypoint, resume sends that same target
 async def test_pause_and_resume_preserve_and_resend_active_target() -> None:
     hub = TelemetryHub()
     vehicle = FakeVehicle()
@@ -266,7 +269,7 @@ async def test_pause_and_resume_preserve_and_resend_active_target() -> None:
     assert paused.state == MissionState.PAUSED
     assert paused.active_target == active_target
     assert vehicle.hold_calls == 1
-    assert vehicle.flight_mode == "LOITER"
+    assert vehicle.flight_mode == "BRAKE"
 
     resumed = await service.resume(execution.execution_id)
 
@@ -279,6 +282,7 @@ async def test_pause_and_resume_preserve_and_resend_active_target() -> None:
 
 
 @pytest.mark.asyncio
+# the checkpoint needs the aircraft position from before the RTL trip
 async def test_stop_captures_checkpoint_before_confirmed_rtl() -> None:
     hub = TelemetryHub()
     vehicle = FakeVehicle()
@@ -343,9 +347,8 @@ async def test_background_guidance_error_does_not_block_stop() -> None:
     target = execution.active_target
     assert target is not None
 
-    # Simulate connection loss exactly when guidance would advance. The
-    # background monitor records the error but must not permanently block a
-    # later recovery Stop once the connection is available again.
+    # lose connection just as guidance tries to advance
+    # a later stop still needs to work once the connection recovers
     vehicle.connected = False
     await hub.publish(
         make_sample(
@@ -373,6 +376,7 @@ async def test_background_guidance_error_does_not_block_stop() -> None:
 
 
 @pytest.mark.asyncio
+# a manual stop should land as INTERRUPTED and return to that spot on continue
 async def test_stop_lands_as_interrupted_then_continue_returns_to_checkpoint() -> None:
     hub = TelemetryHub()
     vehicle = FakeVehicle()
@@ -393,7 +397,7 @@ async def test_stop_lands_as_interrupted_then_continue_returns_to_checkpoint() -
     await hub.publish(checkpoint_sample)
     await service.stop(execution.execution_id)
 
-    # RTL is only terminal after telemetry indicates the return/landing finished.
+    # returning home is not terminal until the landing is confirmed
     vehicle.armed = False
     await hub.publish(
         make_sample(
@@ -429,8 +433,8 @@ async def test_stop_lands_as_interrupted_then_continue_returns_to_checkpoint() -
     assert continued.execution_id == execution.execution_id
     assert continued.state == MissionState.RUNNING
 
-    # Arriving back at the precise checkpoint should resume the interrupted
-    # search target without counting the checkpoint as a completed route point.
+    # hitting the checkpoint should restore the unfinished waypoint
+    # it should not count as another completed search target
     await hub.publish(
         make_sample(
             sequence=6,
@@ -518,8 +522,7 @@ async def test_target_progression_and_normal_completion() -> None:
     assert execution.active_target is None
     assert vehicle.rtl_calls == 1
 
-    # Low altitude/speed alone is not enough to declare landing while the
-    # vehicle still reports itself armed.
+    # low altitude does not mean landing if the drone still reports armed
     await hub.publish(
         make_sample(
             sequence=sequence,
@@ -553,8 +556,7 @@ async def test_execution_history_preserves_every_subscribed_sample() -> None:
     plan = await prepare_plan(service, hub)
     execution = await commence_running(service, hub, plan.plan_id)
 
-    # Keep these points away from the active target so this test only exercises
-    # history collection rather than route progression.
+    # keep samples away from the target, this case is only about history
     for sequence in range(3, 13):
         await hub.publish(
             make_sample(
@@ -580,6 +582,7 @@ async def test_execution_history_preserves_every_subscribed_sample() -> None:
 
 
 @pytest.mark.asyncio
+# another stop during recovery should still preserve the original search target
 async def test_second_stop_while_returning_to_checkpoint_keeps_search_target() -> None:
     hub = TelemetryHub()
     vehicle = FakeVehicle()
@@ -623,8 +626,7 @@ async def test_second_stop_while_returning_to_checkpoint_keeps_search_target() -
     )
     await continue_task
 
-    # The vehicle is now returning to the first checkpoint, not yet to the
-    # original search target. Stop again before that checkpoint is reached.
+    # stop again during recovery, before reaching the first checkpoint
     second_checkpoint = make_sample(
         sequence=6,
         latitude_deg=30.26722,
@@ -639,4 +641,325 @@ async def test_second_stop_while_returning_to_checkpoint_keeps_search_target() -
     assert execution.resume_checkpoint.telemetry == second_checkpoint
     assert execution.resume_checkpoint.active_target == original_search_target
 
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_backlogged_position_is_recorded_but_not_used_for_navigation() -> None:
+    hub = TelemetryHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    first_target = plan.route.waypoints[0]
+
+    # old samples can pile up while an action holds the lock
+    # keep them in history without using them to complete waypoints
+    async with service._action_lock:
+        await hub.publish(make_sample(
+            sequence=10, latitude_deg=first_target.latitude_deg,
+            longitude_deg=first_target.longitude_deg,
+            relative_altitude_m=first_target.altitude_m,
+        ))
+        await hub.publish(make_sample(
+            sequence=11, latitude_deg=30.2700,
+            longitude_deg=-97.7500,
+            relative_altitude_m=25.0,
+        ))
+        await asyncio.sleep(0)
+
+    await asyncio.sleep(0.02)
+    assert execution.active_target == first_target
+    assert execution.completed_targets == []
+    assert [sample.sequence for sample in execution.telemetry_history][-2:] == [10, 11]
+
+    await hub.publish(make_sample(
+        sequence=12, latitude_deg=first_target.latitude_deg,
+        longitude_deg=first_target.longitude_deg,
+        relative_altitude_m=first_target.altitude_m,
+    ))
+
+    async def reached_target() -> None:
+        while not execution.completed_targets:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(reached_target(), timeout=0.5)
+    assert execution.completed_targets == [first_target]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_state", [MissionState.INTERRUPTED, MissionState.COMPLETED])
+async def test_replan_from_terminal_state_archives_previous_execution(final_state) -> None:
+    hub = TelemetryHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    old_plan = await prepare_plan(service, hub)
+    previous = MissionExecution(
+        execution_id="old-execution", plan_id=old_plan.plan_id,
+        state=final_state,
+        telemetry_history=[make_sample(sequence=15)],
+    )
+    service._current_execution = previous
+    service._state = final_state
+
+    new_plan = await service.preview_route(make_search_area())
+
+    assert new_plan.plan_id != old_plan.plan_id
+    assert service.state == MissionState.PLANNING
+    assert service.current_execution is None
+    assert service.past_executions[-1] is previous
+    assert [sample.sequence for sample in previous.telemetry_history] == [15]
+
+
+@pytest.mark.asyncio
+async def test_mission_service_publishes_preflight_running_and_new_target() -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    updates, _ = mission_hub.subscribe()
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+
+    preflight = updates.get_nowait()
+    running = updates.get_nowait()
+    assert preflight.state == MissionState.PREFLIGHT_CHECK
+    assert preflight.active_target is None
+    assert running.state == MissionState.RUNNING
+    assert running.active_target == plan.route.waypoints[0]
+
+    first = plan.route.waypoints[0]
+    await hub.publish(make_sample(
+        sequence=20,
+        latitude_deg=first.latitude_deg,
+        longitude_deg=first.longitude_deg,
+        relative_altitude_m=first.altitude_m,
+    ))
+    await wait_for_active_target(service, plan.route.waypoints[1])
+
+    update = updates.get_nowait()
+    assert update.state == MissionState.RUNNING
+    assert update.active_target == plan.route.waypoints[1]
+    assert running.active_target == first
+    assert execution.completed_targets == [first]
+    await service.shutdown()
+    mission_hub.unsubscribe(updates)
+
+
+@pytest.mark.asyncio
+async def test_failed_preflight_resets_mission_hub_snapshot() -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    updates, _ = mission_hub.subscribe()
+    plan = await prepare_plan(service, hub)
+    vehicle.fail_guided = True
+
+    with pytest.raises(MissionExecutionError):
+        await service.commence(plan.plan_id)
+
+    assert updates.get_nowait().state == MissionState.PREFLIGHT_CHECK
+    assert updates.get_nowait().state == MissionState.PLANNING
+    reconnect_queue, latest = mission_hub.subscribe()
+    assert latest is None
+    assert service.current_execution is None
+    mission_hub.unsubscribe(updates)
+    mission_hub.unsubscribe(reconnect_queue)
+
+@pytest.mark.asyncio
+async def test_navigation_uses_current_position_despite_queued_history() -> None:
+    hub = TelemetryHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    target = execution.active_target
+    assert target is not None
+
+    # build up a queue of history samples while navigation is blocked
+    # once free, it should check the latest aircraft position
+    async with service._action_lock:
+        for sequence in range(3, 503):
+            await hub.publish(make_sample(
+                sequence=sequence,
+                latitude_deg=target.latitude_deg if sequence == 502 else 30.2672,
+                longitude_deg=target.longitude_deg if sequence == 502 else -97.7431,
+                relative_altitude_m=25.0,
+            ))
+
+    await wait_for_active_target(service, plan.route.waypoints[1], timeout_s=2.0)
+
+    async def fully_recorded() -> None:
+        while len(execution.telemetry_history) < 502:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(fully_recorded(), timeout=2.0)
+    assert [sample.sequence for sample in execution.telemetry_history] == list(range(1, 503))
+    assert execution.completed_targets == [target]
+    assert vehicle.go_to_calls[-1] == plan.route.waypoints[1]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+# unexpected disarm stops guidance, but the monitor keeps saving telemetry
+async def test_runtime_error_on_unexpected_disarm_published_and_recording_continues() -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    updates, _ = mission_hub.subscribe()
+
+    vehicle.armed = False
+    await hub.publish(make_sample(sequence=3, relative_altitude_m=10.0))
+
+    async def error_reported() -> None:
+        while service.background_execution_error is None:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(error_reported(), timeout=1.0)
+    error_event = await asyncio.wait_for(updates.get(), timeout=1.0)
+    assert error_event.state == MissionState.RUNNING
+    assert error_event.runtime_error is not None
+    assert error_event.runtime_error.details == {"reason": "UNEXPECTED_DISARM"}
+
+    await hub.publish(make_sample(sequence=4, relative_altitude_m=0.0))
+    async def recorded() -> None:
+        while execution.telemetry_history[-1].sequence != 4:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(recorded(), timeout=1.0)
+    assert len(vehicle.go_to_calls) == 1
+
+    reconnect, latest = mission_hub.subscribe()
+    assert latest is not None and latest.runtime_error == error_event.runtime_error
+    mission_hub.unsubscribe(updates)
+    mission_hub.unsubscribe(reconnect)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_error_on_background_guidance_failure_is_published() -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    updates, _ = mission_hub.subscribe()
+    target = execution.active_target
+    assert target is not None
+
+    vehicle.connected = False
+    await hub.publish(make_sample(
+        sequence=3, latitude_deg=target.latitude_deg,
+        longitude_deg=target.longitude_deg, relative_altitude_m=25.0,
+    ))
+
+    async def failed() -> None:
+        while service.background_execution_error is None:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(failed(), timeout=1.0)
+    event = await asyncio.wait_for(updates.get(), timeout=1.0)
+    assert event.runtime_error is not None
+    assert event.runtime_error.code == "VEHICLE_NOT_READY"
+    assert event.active_target == target
+    await service.shutdown()
+    mission_hub.unsubscribe(updates)
+
+@pytest.mark.asyncio
+async def test_unexpected_monitor_exception_surfaces_as_runtime_error(monkeypatch) -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    updates, _ = mission_hub.subscribe()
+
+    async def broken_handler(execution, sample) -> None:
+        raise RuntimeError("simulated internal failure")
+
+    monkeypatch.setattr(service, "_handle_running_sample", broken_handler)
+    await hub.publish(make_sample(sequence=3, relative_altitude_m=25.0))
+
+    async def reported() -> None:
+        while service.background_execution_error is None:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(reported(), timeout=1.0)
+    event = await asyncio.wait_for(updates.get(), timeout=1.0)
+    assert event.runtime_error is not None
+    assert event.runtime_error.code == "MISSION_MONITOR_FAILED"
+    assert event.state == MissionState.RUNNING
+    assert service.current_execution is execution
+    mission_hub.unsubscribe(updates)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+# disarming in BRAKE also needs an error, without advancing the paused waypoint
+async def test_unexpected_disarm_while_paused_is_reported_without_advancing_route() -> None:
+    hub = TelemetryHub()
+    mission_hub = MissionHub()
+    vehicle = FakeVehicle()
+    service = make_service(hub, vehicle)
+    service._mission_hub = mission_hub
+    plan = await prepare_plan(service, hub)
+    execution = await commence_running(service, hub, plan.plan_id)
+    paused = await service.pause(execution.execution_id)
+    assert paused.state == MissionState.PAUSED
+    assert vehicle.flight_mode == "BRAKE"
+    target = paused.active_target
+    assert target is not None
+
+    updates, _ = mission_hub.subscribe()
+    # being near a target while paused must not advance the route
+    await hub.publish(make_sample(
+        sequence=3,
+        latitude_deg=target.latitude_deg,
+        longitude_deg=target.longitude_deg,
+        relative_altitude_m=target.altitude_m,
+    ))
+    async def recorded_first() -> None:
+        while execution.telemetry_history[-1].sequence != 3:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(recorded_first(), timeout=1.0)
+    assert execution.active_target == target
+    assert execution.completed_targets == []
+    assert len(vehicle.go_to_calls) == 1
+    assert service.background_execution_error is None
+
+    vehicle.armed = False
+    await hub.publish(make_sample(sequence=4, relative_altitude_m=0.0))
+    async def failed() -> None:
+        while service.background_execution_error is None:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(failed(), timeout=1.0)
+
+    error_event = await asyncio.wait_for(updates.get(), timeout=1.0)
+    assert error_event.state == MissionState.PAUSED
+    assert error_event.active_target == target
+    assert error_event.runtime_error is not None
+    assert error_event.runtime_error.code == "VEHICLE_NOT_READY"
+    assert error_event.runtime_error.details == {"reason": "UNEXPECTED_DISARM"}
+    assert execution.telemetry_history[-1].sequence == 4
+    assert len(vehicle.go_to_calls) == 1
+    assert execution.completed_targets == []
+
+    reconnect, latest = mission_hub.subscribe()
+    assert latest is not None
+    assert latest.runtime_error == error_event.runtime_error
+    assert latest.state == MissionState.PAUSED
+    with pytest.raises(MissionExecutionError) as error_info:
+        await service.resume(execution.execution_id)
+    assert error_info.value.code == MissionExecutionErrorCode.VEHICLE_NOT_READY
+    mission_hub.unsubscribe(updates)
+    mission_hub.unsubscribe(reconnect)
     await service.shutdown()

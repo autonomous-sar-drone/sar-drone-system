@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Awaitable
 from datetime import datetime, timezone
 from typing import Protocol
@@ -20,8 +21,12 @@ from app.mission.errors import (
     MissionPlanningError,
     MissionPlanningErrorCode,
 )
+from app.runtime.mission_hub import MissionHub
 from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.errors import VehicleCommandError
+
+
+logger = logging.getLogger(__name__)
 
 
 class VehicleControl(Protocol):
@@ -57,8 +62,12 @@ class MissionService:
         takeoff_timeout_s: float = 30.0,
         landing_altitude_tolerance_m: float = 0.75,
         landing_speed_tolerance_mps: float = 0.75,
+        mission_hub: MissionHub | None = None,
     ) -> None:
         self._telemetry_hub = telemetry_hub
+        self._mission_hub = mission_hub
+        self._past_executions: list[MissionExecution] = []
+        self._active_target_sent_at_utc: datetime | None = None
         self._default_planning_settings = default_planning_settings
         self._max_telemetry_age_s = max_telemetry_age_s
         self._max_transit_distance_m = max_transit_distance_m
@@ -76,8 +85,8 @@ class MissionService:
         self._proposed_plan: MissionPlan | None = None
         self._current_execution: MissionExecution | None = None
 
-        # Planning and execution actions are separate concerns, but execution
-        # actions themselves are serialized so Pause/Stop/Resume cannot race.
+        # route previews have their own lock, mission actions share one lock
+        # so pause, stop, and resume cannot overlap
         self._planning_lock = asyncio.Lock()
         self._action_lock = asyncio.Lock()
 
@@ -85,6 +94,7 @@ class MissionService:
         self._return_terminal_state: MissionState | None = None
         self._resuming_to_checkpoint = False
         self._background_execution_error: MissionExecutionError | None = None
+        self._last_stall_log_at_utc: datetime | None = None
 
     @property
     def state(self) -> MissionState:
@@ -99,6 +109,10 @@ class MissionService:
         return self._current_execution
 
     @property
+    def past_executions(self) -> tuple[MissionExecution, ...]:
+        return tuple(self._past_executions)
+
+    @property
     def background_execution_error(self) -> MissionExecutionError | None:
         return self._background_execution_error
 
@@ -107,18 +121,33 @@ class MissionService:
         search_area: SearchArea,
         planning_settings: PlanningSettings | None = None,
     ) -> MissionPlan:
-        # Only one preview can replace the proposed plan at a time.
+        # only one preview at a time can replace the proposed plan
         async with self._planning_lock:
-            if self._state not in {MissionState.IDLE, MissionState.PLANNING}:
-                raise MissionPlanningError(
-                    code=MissionPlanningErrorCode.MISSION_ACTION_NOT_ALLOWED,
-                    message="A route preview cannot be generated in the current mission state.",
-                    details={"current_state": self._state.value},
-                )
+            async with self._action_lock:
+                if self._state not in {
+                    MissionState.IDLE, MissionState.PLANNING,
+                    MissionState.INTERRUPTED, MissionState.COMPLETED,
+                }:
+                    raise MissionPlanningError(
+                        code=MissionPlanningErrorCode.MISSION_ACTION_NOT_ALLOWED,
+                        message="A route preview cannot be generated in the current mission state.",
+                        details={"current_state": self._state.value},
+                    )
 
-            # A new preview attempt makes any older proposed plan stale.
-            self._state = MissionState.PLANNING
-            self._proposed_plan = None
+                # keep the old execution in history when replanning
+                # stop its telemetry monitor before replacing the plan
+                if self._state in {MissionState.INTERRUPTED, MissionState.COMPLETED}:
+                    await self.shutdown()
+                    if self._current_execution is not None:
+                        self._past_executions.append(self._current_execution)
+                    self._current_execution = None
+                    self._active_target_sent_at_utc = None
+                    if self._mission_hub is not None:
+                        self._mission_hub.clear()
+
+                # a new preview invalidates the previous proposed plan
+                self._state = MissionState.PLANNING
+                self._proposed_plan = None
 
             validation = validate_search_area(search_area)
             if not validation.valid:
@@ -189,8 +218,8 @@ class MissionService:
             plan = self._require_current_plan(plan_id)
             vehicle = self._require_ready_vehicle()
 
-            # Subscribe before reading latest telemetry so no sample can fall
-            # through a gap between initial history capture and monitoring.
+            # subscribe before reading the latest position, so no samples are
+            # missed between the starting snapshot and ongoing history
             telemetry_queue, latest = await self._telemetry_hub.subscribe()
 
             try:
@@ -217,10 +246,9 @@ class MissionService:
                 telemetry_queue=telemetry_queue,
             )
 
-            # Commence does not report RUNNING until mode, arming, takeoff, and
-            # the first GUIDED target have all succeeded. If setup fails before
-            # arming, the proposed plan remains available for another attempt.
-            # Once armed, recovery first tries to return the aircraft safely.
+            # only mark RUNNING after GUIDED, arming, takeoff, and first target work
+            # before arming, failed setup can return to planning
+            # after arming, a failed setup needs an RTL attempt
             try:
                 await self._prepare_vehicle_for_search(
                     vehicle=vehicle,
@@ -239,6 +267,7 @@ class MissionService:
                 raise
 
             execution.active_target = first_target
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._set_state(MissionState.RUNNING)
 
             return execution
@@ -252,8 +281,7 @@ class MissionService:
 
             vehicle = self._require_ready_vehicle()
 
-            # Do not claim PAUSED until the vehicle reports the LOITER mode that
-            # implements our hold-position behavior.
+            # BRAKE has to be confirmed before the mission becomes PAUSED
             await self._call_vehicle(vehicle.hold())
             self._set_state(MissionState.PAUSED)
 
@@ -279,15 +307,15 @@ class MissionService:
             await self._call_vehicle(vehicle.set_guided())
             await self._call_vehicle(vehicle.go_to(execution.active_target))
 
-            # The same target is deliberately resent after leaving LOITER.
+            # resend the saved target after switching back from BRAKE to GUIDED
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._set_state(MissionState.RUNNING)
 
             return execution
 
     async def stop(self, execution_id: str) -> MissionExecution:
         async with self._action_lock:
-            # Stop is a recovery/safety action. A prior background guidance
-            # error must not prevent the operator from attempting RTL.
+            # stop still needs to allow RTL after a guidance error
             execution = self._require_current_execution(execution_id)
 
             if execution.state not in {MissionState.RUNNING, MissionState.PAUSED}:
@@ -297,14 +325,12 @@ class MissionService:
             _, latest = await self._telemetry_hub.get_latest()
             telemetry = self._validate_execution_telemetry(latest)
 
-            # Capture the actual aircraft position immediately before leaving
-            # search behavior. The target being pursued is preserved separately
-            # so Continue can return to this point and then resume that target.
+            # save where the aircraft actually stopped and which search target
+            # it was following, continue needs both pieces
             resume_target = execution.active_target
 
-            # While Continue is flying back to an earlier checkpoint, the
-            # temporary active target is that checkpoint. A second Stop must
-            # still remember the real search target that should resume later.
+            # during recovery the checkpoint is temporarily the active target
+            # stopping again should still remember the unfinished search waypoint
             if (
                 self._resuming_to_checkpoint
                 and execution.resume_checkpoint is not None
@@ -317,8 +343,7 @@ class MissionService:
                 active_target=resume_target,
             )
 
-            # Important: the mission remains RUNNING/PAUSED while RTL is only a
-            # request. MavlinkVehicle returns after reported RTL confirmation.
+            # wait for RTL confirmation before reporting RETURNING_HOME
             await self._call_vehicle(vehicle.return_to_launch())
 
             execution.active_target = None
@@ -351,9 +376,8 @@ class MissionService:
             _, latest = await self._telemetry_hub.get_latest()
             self._validate_execution_telemetry(latest)
 
-            # The telemetry monitor intentionally remains alive while the
-            # execution is INTERRUPTED. This preserves the continuous in-memory
-            # history and means Continue does not create a second subscriber.
+            # keep the monitor subscribed while interrupted to preserve history
+            # continue reuses it rather than creating another telemetry reader
             if (
                 self._execution_monitor_task is None
                 or self._execution_monitor_task.done()
@@ -375,9 +399,8 @@ class MissionService:
                     search_altitude_m=plan.planning_settings.search_altitude_m,
                 )
 
-                # Resume uses the exact interrupted horizontal position rather
-                # than replaying a potentially long route segment from its
-                # prior start.
+                # fly back to the recorded interruption position first
+                # no need to replay the earlier part of the route
                 checkpoint_target = Waypoint(
                     latitude_deg=checkpoint.telemetry.latitude_deg,
                     longitude_deg=checkpoint.telemetry.longitude_deg,
@@ -396,6 +419,7 @@ class MissionService:
                 raise
 
             execution.active_target = checkpoint_target
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = True
             self._set_state(MissionState.RUNNING)
 
@@ -412,14 +436,13 @@ class MissionService:
         status = vehicle.get_status()
 
         if status.armed:
-            # A setup failure after arming may leave the aircraft airborne or
-            # ready to move. Prefer a confirmed RTL over pretending the failed
-            # execution safely returned to its prior application state.
+            # setup can fail after arming, when the aircraft may still be flying
+            # request RTL rather than treating it as back on the ground
             try:
                 await self._call_vehicle(vehicle.return_to_launch())
             except MissionExecutionError as recovery_error:
-                # No stronger state claim is safe when RTL itself cannot be
-                # confirmed. Preserve the recovery error for later diagnosis.
+                # if RTL cannot be confirmed, keep the error instead of guessing
+                # which state the aircraft ended up in
                 self._background_execution_error = recovery_error
                 return
 
@@ -430,16 +453,20 @@ class MissionService:
             self._set_state(MissionState.RETURNING_HOME)
             return
 
-        # No armed aircraft needs recovery, so restore the stable state that
-        # existed before this setup attempt.
+        # if it never armed, return to the state from before this attempt
         self._return_terminal_state = None
         self._resuming_to_checkpoint = False
         self._background_execution_error = None
 
         if discard_execution_when_grounded:
             await self.shutdown()
+            # publish the return to planning before clearing the failed execution
+            # otherwise reconnecting clients could see an old preflight state
+            self._set_state(grounded_state)
             self._current_execution = None
-            self._state = grounded_state
+            self._active_target_sent_at_utc = None
+            if self._mission_hub is not None:
+                self._mission_hub.clear()
         else:
             execution.active_target = None
             self._set_state(grounded_state)
@@ -468,15 +495,15 @@ class MissionService:
     ) -> None:
         await self._call_vehicle(vehicle.set_guided())
 
-        # Avoid sending a redundant arm command when the reported state already
-        # says armed. MavlinkVehicle itself still verifies the state transition
-        # when arming is necessary.
+        # arming is only needed when the vehicle reports disarmed
+        # the vehicle adapter confirms the change when it sends the command
         if not vehicle.get_status().armed:
             await self._call_vehicle(vehicle.arm())
 
         await self._call_vehicle(vehicle.takeoff(search_altitude_m))
         await self._wait_for_takeoff_altitude(search_altitude_m)
 
+    # a successful takeoff command does not mean the aircraft reached altitude
     async def _wait_for_takeoff_altitude(self, target_altitude_m: float) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._takeoff_timeout_s
@@ -534,47 +561,66 @@ class MissionService:
     ) -> None:
         try:
             while True:
+                # record queued positions even while HTTP actions wait for the aircraft
                 sample = await telemetry_queue.get()
-
                 execution = self._current_execution
                 if execution is None or execution.execution_id != execution_id:
                     return
-
-                # History collection is intentionally outside the action lock.
-                # If a Pause/Stop call waits on vehicle confirmation, incoming
-                # telemetry continues to be consumed and preserved instead of
-                # collapsing down to TelemetryHub's latest sample.
                 self._append_history_sample(execution, sample)
 
-                # Once background guidance fails, keep collecting the real
-                # telemetry trail but stop issuing additional autonomous commands.
-                # The next operator action surfaces the saved error.
+                # drain history in batches, but do not let a backlog stall navigation
+                for _ in range(255):
+                    try:
+                        queued = telemetry_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    self._append_history_sample(execution, queued)
+
+                # keep history after guidance fails, without sending new targets
                 if self._background_execution_error is not None:
                     continue
 
                 try:
-                    if execution.state == MissionState.RUNNING:
+                    if execution.state in {
+                        MissionState.RUNNING, MissionState.PAUSED,
+                        MissionState.RETURNING_HOME,
+                    }:
                         async with self._action_lock:
-                            # The state may have changed while waiting for the lock.
-                            if execution.state == MissionState.RUNNING:
-                                await self._handle_running_sample(execution, sample)
+                            current = self._current_execution
+                            if current is None or current.execution_id != execution_id:
+                                return
 
-                    elif execution.state == MissionState.RETURNING_HOME:
-                        async with self._action_lock:
-                            if (
+                            latest = await self._latest_navigation_sample()
+                            if latest is None:
+                                continue
+
+                            if execution.state in {MissionState.RUNNING, MissionState.PAUSED}:
+                                # an unexpected disarm can also happen while paused in BRAKE
+                                # report it as a runtime error, not a new mission state
+                                vehicle = self._vehicle
+                                if vehicle is not None:
+                                    status = vehicle.get_status()
+                                    if status.connected and not status.armed:
+                                        raise MissionExecutionError(
+                                            code=MissionExecutionErrorCode.VEHICLE_NOT_READY,
+                                            message="The vehicle disarmed unexpectedly; mission guidance stopped.",
+                                            details={"reason": "UNEXPECTED_DISARM"},
+                                        )
+
+                                # drift while paused should never complete a waypoint
+                                if execution.state == MissionState.RUNNING:
+                                    await self._handle_running_sample(execution, latest)
+
+                            elif (
                                 execution.state == MissionState.RETURNING_HOME
-                                and self._sample_indicates_landing(sample)
+                                and self._sample_indicates_landing(latest)
                             ):
-                                terminal_state = self._return_terminal_state
-                                if terminal_state is None:
-                                    terminal_state = MissionState.INTERRUPTED
-
-                                self._set_state(terminal_state)
+                                terminal_state = (
+                                    self._return_terminal_state
+                                    or MissionState.INTERRUPTED
+                                )
                                 execution.active_target = None
-
-                                # Interrupted missions remain monitored because the
-                                # same execution may later Continue. A completed
-                                # mission has no continuation path in this slice.
+                                self._set_state(terminal_state)
                                 if terminal_state == MissionState.COMPLETED:
                                     return
 
@@ -582,14 +628,38 @@ class MissionService:
                         return
 
                 except MissionExecutionError as error:
-                    # Background guidance has no HTTP caller to receive an error.
-                    # Save it for the next operator action and keep raw history.
-                    self._background_execution_error = error
+                    self._report_background_error(error)
+                except Exception:
+                    logger.exception("Unexpected mission monitor exception")
+                    self._report_background_error(MissionExecutionError(
+                        code=MissionExecutionErrorCode.MISSION_MONITOR_FAILED,
+                        message="Mission guidance stopped because the background monitor failed.",
+                        details={"reason": "UNEXPECTED_MONITOR_ERROR"},
+                    ))
 
         except asyncio.CancelledError:
             raise
+        except Exception:
+            logger.exception("Mission telemetry monitor exited unexpectedly")
+            self._report_background_error(MissionExecutionError(
+                code=MissionExecutionErrorCode.MISSION_MONITOR_FAILED,
+                message="Mission monitor stopped unexpectedly; guidance is no longer active.",
+                details={"reason": "MONITOR_EXITED"},
+            ))
         finally:
             await self._telemetry_hub.unsubscribe(telemetry_queue)
+
+    def _report_background_error(self, error: MissionExecutionError) -> None:
+        if self._background_execution_error is not None:
+            return
+        self._background_execution_error = error
+        logger.error("Mission %s guidance stopped: %s (%s)",
+                     self._current_execution.execution_id
+                     if self._current_execution else "unknown",
+                     error.message, error.code.value)
+        # publish the error even if the mission still says RUNNING or PAUSED
+        # runtimeError tells the frontend that guidance stopped
+        self._publish_execution()
 
     async def _handle_running_sample(
         self,
@@ -597,7 +667,10 @@ class MissionService:
         sample: TelemetrySample,
     ) -> None:
         target = execution.active_target
-        if target is None or not self._target_reached(sample, target):
+        if target is None:
+            return
+        if not self._target_reached(sample, target):
+            self._log_long_target_wait(execution, sample, target)
             return
 
         vehicle = self._require_ready_vehicle()
@@ -610,13 +683,15 @@ class MissionService:
                     message="Mission resume state is missing the interrupted target.",
                 )
 
-            # Reaching the checkpoint is not completing a planned search target.
-            # It only restores the aircraft to the exact interruption point.
+            # reaching the checkpoint is not another completed search waypoint
             await self._call_vehicle(vehicle.go_to(checkpoint.active_target))
             execution.active_target = checkpoint.active_target
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = False
+            self._publish_execution()
             return
 
+        logger.info("Mission %s reached waypoint %s", execution.execution_id, len(execution.completed_targets) + 1)
         execution.completed_targets.append(target)
         plan = self._require_current_plan(execution.plan_id)
 
@@ -626,16 +701,62 @@ class MissionService:
             next_target = plan.route.waypoints[next_index]
             await self._call_vehicle(vehicle.go_to(next_target))
             execution.active_target = next_target
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
+            self._publish_execution()
             return
 
-        # The final search target is complete. Normal completion and operator
-        # Stop share RTL physically but end in different terminal states.
+        # both normal completion and stop use RTL, but only the normal route
+        # finishes as COMPLETED after landing
         await self._call_vehicle(vehicle.return_to_launch())
 
         execution.active_target = None
         self._return_terminal_state = MissionState.COMPLETED
         self._set_state(MissionState.RETURNING_HOME)
 
+    def _log_long_target_wait(
+        self, execution: MissionExecution, sample: TelemetrySample, target: Waypoint
+    ) -> None:
+        sent_at = self._active_target_sent_at_utc
+        if sent_at is None:
+            return
+        now = datetime.now(timezone.utc)
+        if (now - sent_at).total_seconds() < 60:
+            return
+        if (
+            self._last_stall_log_at_utc is not None
+            and (now - self._last_stall_log_at_utc).total_seconds() < 30
+        ):
+            return
+        self._last_stall_log_at_utc = now
+        distance_m = geodesic_distance_m(
+            GeoPoint(latitude_deg=sample.latitude_deg, longitude_deg=sample.longitude_deg),
+            GeoPoint(latitude_deg=target.latitude_deg, longitude_deg=target.longitude_deg),
+        )
+        logger.warning(
+            "Mission %s still pursuing target after %.0fs: horizontal_error=%.2fm altitude_error=%.2fm",
+            execution.execution_id,
+            (now - sent_at).total_seconds(),
+            distance_m,
+            abs(sample.relative_altitude_m - target.altitude_m),
+        )
+
+    async def _latest_navigation_sample(self) -> TelemetrySample | None:
+        # history uses queued samples, waypoint checks use the latest position
+        # otherwise a busy queue can keep navigation behind the aircraft
+        _, sample = await self._telemetry_hub.get_latest()
+        if sample is None or self._telemetry_age_s(sample) > self._max_telemetry_age_s:
+            return None
+
+        # only samples received after the current target was sent count as arrival
+        if (
+            self._state == MissionState.RUNNING
+            and self._active_target_sent_at_utc is not None
+            and sample.timestamp_utc < self._active_target_sent_at_utc
+        ):
+            return None
+        return sample
+
+    # require both horizontal distance and altitude to be within tolerance
     def _target_reached(
         self,
         sample: TelemetrySample,
@@ -670,9 +791,8 @@ class MissionService:
 
         status = vehicle.get_status()
 
-        # Low altitude and speed alone can also describe a near-ground hover.
-        # Require a current heartbeat reporting DISARMED before declaring the
-        # RTL/landing sequence finished.
+        # low altitude and speed could still be a hover near the ground
+        # landing also needs a current heartbeat showing disarmed
         return (
             status.connected
             and not status.armed
@@ -790,6 +910,7 @@ class MissionService:
 
         return vehicle
 
+    # convert lower-level MAVLink failures into mission errors for the API
     async def _call_vehicle(self, operation: Awaitable[None]) -> None:
         try:
             await operation
@@ -805,6 +926,13 @@ class MissionService:
 
         if self._current_execution is not None:
             self._current_execution.state = state
+            self._publish_execution()
+
+    def _publish_execution(self) -> None:
+        if self._mission_hub is not None and self._current_execution is not None:
+            self._mission_hub.publish(
+                self._current_execution, runtime_error=self._background_execution_error
+            )
 
     def _raise_action_not_allowed(self, action: str) -> None:
         raise MissionExecutionError(
@@ -822,9 +950,7 @@ class MissionService:
         execution: MissionExecution,
         sample: TelemetrySample,
     ) -> None:
-        # A subscription normally delivers each sample once. Keep a small
-        # guard here so an accidentally repeated publication does not duplicate
-        # the immediately previous history point.
+        # avoid appending the same sequence twice if a sample gets repeated
         if (
             execution.telemetry_history
             and execution.telemetry_history[-1].sequence == sample.sequence
