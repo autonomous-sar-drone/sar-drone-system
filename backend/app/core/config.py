@@ -17,3 +17,21 @@ MAX_TRANSIT_DISTANCE_M: float = float(
 MAX_ROUTE_DISTANCE_M: float = float(
     os.getenv("MAX_ROUTE_DISTANCE_M", "10000.0")
 )
+TARGET_REACHED_TOLERANCE_M: float = float(
+    os.getenv("TARGET_REACHED_TOLERANCE_M", "3.0")
+)
+TARGET_ALTITUDE_TOLERANCE_M: float = float(
+    os.getenv("TARGET_ALTITUDE_TOLERANCE_M", "2.0")
+)
+TAKEOFF_ALTITUDE_TOLERANCE_M: float = float(
+    os.getenv("TAKEOFF_ALTITUDE_TOLERANCE_M", "1.5")
+)
+TAKEOFF_TIMEOUT_S: float = float(
+    os.getenv("TAKEOFF_TIMEOUT_S", "30.0")
+)
+LANDING_ALTITUDE_TOLERANCE_M: float = float(
+    os.getenv("LANDING_ALTITUDE_TOLERANCE_M", "0.75")
+)
+LANDING_SPEED_TOLERANCE_MPS: float = float(
+    os.getenv("LANDING_SPEED_TOLERANCE_MPS", "0.75")
+)

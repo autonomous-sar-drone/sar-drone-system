@@ -86,3 +86,24 @@ async def test_multiple_waiters_receive_same_update() -> None:
 
     assert result1 == (1, sample)
     assert result2 == (1, sample)
+
+@pytest.mark.asyncio
+async def test_subscription_preserves_every_published_sample() -> None:
+    hub = TelemetryHub()
+    initial = make_sample(1)
+    sample2 = make_sample(2)
+    sample3 = make_sample(3)
+
+    await hub.publish(initial)
+
+    queue, latest = await hub.subscribe()
+
+    assert latest == initial
+
+    await hub.publish(sample2)
+    await hub.publish(sample3)
+
+    assert await queue.get() == sample2
+    assert await queue.get() == sample3
+
+    await hub.unsubscribe(queue)
