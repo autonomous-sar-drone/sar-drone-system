@@ -175,3 +175,14 @@ describe('generating and editing a plan', () => {
     expect(cancelledThenLate.currentRoute).toBeNull();
   });
 });
+
+
+describe('new search reset', () => {
+  it('resets the prior plan and polygon and starts drawing', () => {
+    const before = run(...withPlan);
+    const after = planningReducer(before, { type: 'START_NEW_SEARCH' });
+    expect(after).toEqual({ ...initialPlanningState, phase: 'PLANNING' });
+    expect(editMode(after)).toBe('drawing');
+    expect(canCommence(after)).toBe(false);
+  });
+});

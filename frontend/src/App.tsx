@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { DroneViewPanel } from './features/camera/DroneViewPanel';
 import { DetectionsPanel } from './features/detections/DetectionsPanel';
 import { MapPanel } from './features/map/MapPanel';
@@ -14,6 +14,22 @@ export default function App() {
   const { reading, status, nowMs, mission } = useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
   const commands = useMissionCommands();
+  const [dismissedCompletedId, setDismissedCompletedId] = useState<string | null>(null);
+
+  // The backend keeps the terminal snapshot until a new preview is requested.
+  // Hide only the finished execution the operator chose to leave behind;
+  // a subsequent execution with a different id is always shown.
+  const visibleMission =
+    mission?.missionState === 'COMPLETED' && mission.executionId === dismissedCompletedId
+      ? null
+      : mission;
+
+  function startNewSearch() {
+    if (mission?.missionState !== 'COMPLETED') return;
+    setDismissedCompletedId(mission.executionId);
+    dispatch({ type: 'START_NEW_SEARCH' });
+    commands.dismissError();
+  }
 
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
@@ -35,14 +51,15 @@ export default function App() {
       <main className="dashboard">
         <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
-        <MissionStatusPanel planning={planning} mission={mission} />
+        <MissionStatusPanel planning={planning} mission={visibleMission} />
         <DroneViewPanel />
         <DetectionsPanel />
         <MissionControls
           planning={planning}
           dispatch={dispatch}
           onGenerate={generate}
-          mission={mission}
+          mission={visibleMission}
+          onStartNewSearch={startNewSearch}
           commands={commands}
         />
       </main>

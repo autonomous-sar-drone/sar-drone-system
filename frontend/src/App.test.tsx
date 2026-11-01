@@ -154,10 +154,10 @@ describe('search area and route preview flow', () => {
 describe('live mission controls', () => {
   it('offers only the actions each mission state allows', () => {
     const cases: [MissionState, string[], string[]][] = [
-      ['PREFLIGHT_CHECK', ['Stop and return home'], ['Pause', 'Resume search']],
+      ['PREFLIGHT_CHECK', [], ['Pause', 'Resume search', 'Stop and return home', 'Continue search']],
       ['RUNNING', ['Pause', 'Stop and return home'], ['Resume search', 'Continue search']],
       ['PAUSED', ['Resume search', 'Stop and return home'], ['Pause']],
-      ['INTERRUPTED', ['Continue search', 'Stop and return home'], ['Pause', 'Resume search']],
+      ['INTERRUPTED', ['Continue search'], ['Pause', 'Resume search', 'Stop and return home']],
       ['RETURNING_HOME', [], ['Pause', 'Resume search', 'Stop and return home']],
     ];
 
@@ -228,5 +228,103 @@ describe('live mission controls', () => {
     };
     render(<App />);
     expect(screen.getByText(/Flying to/)).toBeInTheDocument();
+  });
+});
+
+
+describe('new search after completed execution', () => {
+  it('clears the previous drawing and allows a fresh preview and commence', async () => {
+    const completed = missionUpdate('COMPLETED');
+    events = { ...events, mission: completed };
+    const nextPlan = { ...plan, planId: 'plan-2' };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/routes/preview') return new Response(JSON.stringify(nextPlan), { status: 200 });
+      if (url === '/api/missions/commence') {
+        return new Response(JSON.stringify({
+          executionId: 'exec-2', planId: 'plan-2', missionState: 'RUNNING', activeTarget: null,
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected endpoint: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    expect(screen.getByText('Search complete')).toBeInTheDocument();
+
+    click('Start a new search');
+    expect(map()).toHaveAttribute('data-mode', 'drawing');
+    expect(map()).toHaveAttribute('data-route-waypoints', '0');
+    expect(screen.getByText('Planning')).toBeInTheDocument();
+    expect(controls().queryByRole('button', { name: 'Start a new search' })).toBeNull();
+    expect(controls().queryByRole('button', { name: 'Commence mission' })).toBeNull();
+
+    click('stub: place square');
+    click('stub: click first corner');
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Generate mission plan' })));
+    expect(controls().getByRole('button', { name: 'Commence mission' })).toBeEnabled();
+    expect(screen.getByText('Plan ready')).toBeInTheDocument();
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Commence mission' })));
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls.map(([url]) => url)).toEqual(['/api/routes/preview', '/api/missions/commence']);
+    expect(JSON.parse(calls[1][1].body as string)).toEqual({ planId: 'plan-2' });
+    // The HTTP response isn't authoritative for UI mission state; only WS updates are.
+    expect(screen.getByText('Plan ready')).toBeInTheDocument();
+  });
+
+  it('ignores only the dismissed completed execution; a new WS execution becomes visible', () => {
+    events = { ...events, mission: missionUpdate('COMPLETED') };
+    const view = render(<App />);
+    click('Start a new search');
+    expect(screen.getByText('Planning')).toBeInTheDocument();
+
+    // The old COMPLETED message may be replayed on reconnect. Keep it dismissed.
+    view.rerender(<App />);
+    expect(controls().queryByRole('button', { name: 'Start a new search' })).toBeNull();
+
+    events = { ...events, mission: missionUpdate('RUNNING', { executionId: 'exec-2', planId: 'plan-2' }) };
+    view.rerender(<App />);
+    expect(screen.getByText('Searching')).toBeInTheDocument();
+    expect(controls().getByRole('button', { name: 'Pause' })).toBeEnabled();
+  });
+
+  it('shows action buttons only in states accepted by the backend', () => {
+    events = { ...events, mission: missionUpdate('PREFLIGHT_CHECK') };
+    const view = render(<App />);
+    expect(controls().queryAllByRole('button')).toHaveLength(0);
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    view.rerender(<App />);
+    expect(controls().getAllByRole('button')).toHaveLength(1);
+    expect(controls().getByRole('button', { name: 'Continue search' })).toBeEnabled();
+  });
+});
+
+describe('operator-facing mission copy', () => {
+  it('does not imply an operator-requested interruption was unexpected', () => {
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    render(<App />);
+    expect(screen.getByText(/The search was interrupted/)).toBeInTheDocument();
+    expect(screen.queryByText(/stopped on its own/)).toBeNull();
+  });
+
+  it('does not describe natural RTL as an operator stop', () => {
+    events = { ...events, mission: missionUpdate('RETURNING_HOME') };
+    render(<App />);
+    expect(screen.getByText(/The aircraft is returning home/)).toBeInTheDocument();
+    expect(screen.queryByText(/The search was stopped/)).toBeNull();
+  });
+
+  it('gives a specific message when auto-takeoff failed to reach altitude', async () => {
+    mockFetch(409, {
+      detail: {
+        code: 'VEHICLE_NOT_READY',
+        message: 'The vehicle did not reach the required takeoff altitude in time.',
+        details: { targetAltitudeM: 25 },
+      },
+    });
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    render(<App />);
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Continue search' })));
+    expect(screen.getByRole('alert')).toHaveTextContent('did not reach takeoff altitude');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Check that it is connected, armed');
   });
 });

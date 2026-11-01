@@ -9,14 +9,14 @@ export const MISSION_STATE_COPY: Record<MissionState, { label: string; detail: s
   PLANNING: { label: 'Planning', detail: 'Working out the route for the search area.' },
   PREFLIGHT_CHECK: {
     label: 'Preparing for takeoff',
-    detail: 'Checking the aircraft is ready, then arming and climbing.',
+    detail: 'Checking the aircraft is ready, then arming and climbing. Wait for takeoff to finish.',
   },
   RUNNING: { label: 'Searching', detail: 'Flying the route and covering the search area.' },
   PAUSED: { label: 'Paused', detail: 'Holding position. Resume to carry on from the next waypoint.' },
-  RETURNING_HOME: { label: 'Returning home', detail: 'The search was stopped and the aircraft is flying back.' },
+  RETURNING_HOME: { label: 'Returning home', detail: 'The aircraft is returning home. Wait for it to land.' },
   INTERRUPTED: {
     label: 'Interrupted',
-    detail: 'The mission stopped on its own. Check the aircraft, then continue or bring it home.',
+    detail: 'The search was interrupted. Once the aircraft has landed, you can continue the unfinished route.',
   },
   COMPLETED: { label: 'Search complete', detail: 'Every waypoint on the route was reached.' },
 };
@@ -64,9 +64,17 @@ export function missionErrorMessage(error: MissionError): OperatorError {
         action: 'Wait for GPS to settle, then try again.',
       };
     case 'VEHICLE_NOT_READY':
+      // During Commence/Continue, the backend arms the aircraft automatically.
+      // An altitude timeout shouldn't tell the operator to arm it manually.
+      if (error.message.includes('did not reach the required takeoff altitude')) {
+        return {
+          title: 'The aircraft did not reach takeoff altitude.',
+          action: 'Check the aircraft and simulator before attempting another takeoff.',
+        };
+      }
       return {
         title: 'The aircraft is not ready to fly.',
-        action: 'Check that it is connected, armed and reporting a heartbeat, then try again.',
+        action: 'Check the vehicle connection and readiness before retrying.',
       };
     case 'VEHICLE_COMMAND_FAILED':
       return {

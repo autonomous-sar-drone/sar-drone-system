@@ -20,6 +20,7 @@ interface Props {
   /** Latest mission_update, or null before any mission has run. */
   mission: MissionUpdateData | null;
   commands: MissionCommands;
+  onStartNewSearch: () => void;
 }
 
 const ISSUE_COPY = {
@@ -34,7 +35,7 @@ const ISSUE_COPY = {
  * Once the backend reports a live execution it takes over: the backend owns mission
  * state, so the buttons follow missionState rather than anything computed here.
  */
-export function MissionControls({ planning, dispatch, onGenerate, mission, commands }: Props) {
+export function MissionControls({ planning, dispatch, onGenerate, mission, commands, onStartNewSearch }: Props) {
   const mode = editMode(planning);
   const { vertices } = planning.searchArea;
   const issue = localIssue(planning);
@@ -94,30 +95,26 @@ export function MissionControls({ planning, dispatch, onGenerate, mission, comma
         </>
       );
     } else if (mission.missionState === 'INTERRUPTED') {
+      // The aircraft is already landed. Backend Stop accepts RUNNING/PAUSED only.
       buttons = (
-        <>
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={busy !== null}
-            aria-busy={busy === 'continue'}
-            onClick={() => commands.resumeInterrupted(id)}
-          >
-            {busy === 'continue' ? 'Continuing…' : 'Continue search'}
-          </button>
-          {stopButton}
-        </>
+        <button
+          type="button"
+          className="btn btn--primary"
+          disabled={busy !== null}
+          aria-busy={busy === 'continue'}
+          onClick={() => commands.resumeInterrupted(id)}
+        >
+          {busy === 'continue' ? 'Continuing…' : 'Continue search'}
+        </button>
       );
-    } else if (mission.missionState === 'PREFLIGHT_CHECK') {
-      buttons = stopButton;
     } else {
-      // RETURNING_HOME: the aircraft is already coming back, nothing left to command.
+      // PREFLIGHT_CHECK and RETURNING_HOME have no backend-supported action here.
       buttons = null;
     }
   } else if (mission?.missionState === 'COMPLETED') {
     note = MISSION_STATE_COPY.COMPLETED.detail;
     buttons = (
-      <button type="button" className="btn btn--primary" onClick={() => dispatch({ type: 'CANCEL_PLANNING' })}>
+      <button type="button" className="btn btn--primary" onClick={onStartNewSearch}>
         Start a new search
       </button>
     );
