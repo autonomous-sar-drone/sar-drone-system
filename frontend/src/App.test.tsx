@@ -1,11 +1,35 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { MapViewProps } from './features/map/MapView';
+import type { EventsState } from './features/events/useEvents';
+import type { MissionState, MissionUpdateData } from './types/mission';
 
-vi.mock('./features/telemetry/useTelemetry', () => ({
-  useTelemetry: () => ({ reading: null, status: 'connecting', nowMs: 0 }),
+/**
+ * The real hook opens a WebSocket, which jsdom has no server for, so the socket layer is
+ * stubbed and `events` stands in for whatever the backend last pushed. Tests mutate it
+ * before rendering to put the app in a given mission state.
+ */
+let events: EventsState;
+vi.mock('./features/events/useEvents', () => ({
+  useEvents: () => events,
 }));
+
+function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateData> = {}): MissionUpdateData {
+  return {
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    missionState,
+    activeTarget: null,
+    runtimeError: null,
+    timestamp: '2026-10-26T16:00:00Z',
+    ...extra,
+  };
+}
+
+beforeEach(() => {
+  events = { reading: null, status: 'connecting', nowMs: 0, mission: null };
+});
 
 /** WebGL isn't available in jsdom, so the map is replaced by a stub exposing the same callbacks. */
 const SQUARE = [
@@ -124,5 +148,183 @@ describe('search area and route preview flow', () => {
     expect(map()).toHaveAttribute('data-route-waypoints', '0');
     expect(controls().queryByRole('button', { name: 'Commence mission' })).toBeNull();
     expect(map()).toHaveAttribute('data-mode', 'editing');
+  });
+});
+
+describe('live mission controls', () => {
+  it('offers only the actions each mission state allows', () => {
+    const cases: [MissionState, string[], string[]][] = [
+      ['PREFLIGHT_CHECK', [], ['Pause', 'Resume search', 'Stop and return home', 'Continue search']],
+      ['RUNNING', ['Pause', 'Stop and return home'], ['Resume search', 'Continue search']],
+      ['PAUSED', ['Resume search', 'Stop and return home'], ['Pause']],
+      ['INTERRUPTED', ['Continue search'], ['Pause', 'Resume search', 'Stop and return home']],
+      ['RETURNING_HOME', [], ['Pause', 'Resume search', 'Stop and return home']],
+    ];
+
+    for (const [state, offered, withheld] of cases) {
+      events = { ...events, mission: missionUpdate(state) };
+      const { unmount } = render(<App />);
+      for (const name of offered) {
+        expect(controls().getByRole('button', { name }), `${state} offers ${name}`).toBeEnabled();
+      }
+      for (const name of withheld) {
+        expect(controls().queryByRole('button', { name }), `${state} withholds ${name}`).toBeNull();
+      }
+      unmount();
+    }
+  });
+
+  it('posts pause to the execution the backend reported', async () => {
+    const fetchMock = mockFetch(200, {
+      executionId: 'exec-1',
+      planId: 'plan-1',
+      missionState: 'PAUSED',
+    });
+    events = { ...events, mission: missionUpdate('RUNNING') };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Pause' })));
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/missions/exec-1/pause');
+  });
+
+  it('shows a rejected command without moving the state the backend owns', async () => {
+    mockFetch(409, {
+      detail: { code: 'MISSION_ACTION_NOT_ALLOWED', message: 'not allowed', details: {} },
+    });
+    events = { ...events, mission: missionUpdate('RUNNING') };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Pause' })));
+    expect(screen.getByRole('alert')).toHaveTextContent("That isn't allowed right now");
+    // The socket is the only thing that may change mission state, so the buttons stand still.
+    expect(controls().getByRole('button', { name: 'Pause' })).toBeEnabled();
+  });
+
+  it('raises a background failure over anything the operator just did', () => {
+    events = {
+      ...events,
+      mission: missionUpdate('INTERRUPTED', {
+        runtimeError: { code: 'MISSION_MONITOR_FAILED', message: 'monitor died', details: {} },
+      }),
+    };
+    render(<App />);
+    expect(screen.getByRole('alert')).toHaveTextContent('lost track of the mission');
+    // A runtime error is the aircraft's problem, not a dismissible notice.
+    expect(within(screen.getByRole('alert')).queryByRole('button', { name: 'Dismiss' })).toBeNull();
+  });
+
+  it('names the waypoint the drone is flying to', () => {
+    events = {
+      ...events,
+      mission: missionUpdate('RUNNING', {
+        activeTarget: {
+          latitudeDeg: 30.2291,
+          longitudeDeg: -97.7555,
+          altitudeM: 25,
+          altitudeReference: 'HOME_RELATIVE',
+        },
+      }),
+    };
+    render(<App />);
+    expect(screen.getByText(/Flying to/)).toBeInTheDocument();
+  });
+});
+
+
+describe('new search after completed execution', () => {
+  it('clears the previous drawing and allows a fresh preview and commence', async () => {
+    const completed = missionUpdate('COMPLETED');
+    events = { ...events, mission: completed };
+    const nextPlan = { ...plan, planId: 'plan-2' };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/routes/preview') return new Response(JSON.stringify(nextPlan), { status: 200 });
+      if (url === '/api/missions/commence') {
+        return new Response(JSON.stringify({
+          executionId: 'exec-2', planId: 'plan-2', missionState: 'RUNNING', activeTarget: null,
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected endpoint: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    expect(screen.getByText('Search complete')).toBeInTheDocument();
+
+    click('Start a new search');
+    expect(map()).toHaveAttribute('data-mode', 'drawing');
+    expect(map()).toHaveAttribute('data-route-waypoints', '0');
+    expect(screen.getByText('Planning')).toBeInTheDocument();
+    expect(controls().queryByRole('button', { name: 'Start a new search' })).toBeNull();
+    expect(controls().queryByRole('button', { name: 'Commence mission' })).toBeNull();
+
+    click('stub: place square');
+    click('stub: click first corner');
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Generate mission plan' })));
+    expect(controls().getByRole('button', { name: 'Commence mission' })).toBeEnabled();
+    expect(screen.getByText('Plan ready')).toBeInTheDocument();
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Commence mission' })));
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls.map(([url]) => url)).toEqual(['/api/routes/preview', '/api/missions/commence']);
+    expect(JSON.parse(calls[1][1].body as string)).toEqual({ planId: 'plan-2' });
+    // The HTTP response isn't authoritative for UI mission state; only WS updates are.
+    expect(screen.getByText('Plan ready')).toBeInTheDocument();
+  });
+
+  it('ignores only the dismissed completed execution; a new WS execution becomes visible', () => {
+    events = { ...events, mission: missionUpdate('COMPLETED') };
+    const view = render(<App />);
+    click('Start a new search');
+    expect(screen.getByText('Planning')).toBeInTheDocument();
+
+    // The old COMPLETED message may be replayed on reconnect. Keep it dismissed.
+    view.rerender(<App />);
+    expect(controls().queryByRole('button', { name: 'Start a new search' })).toBeNull();
+
+    events = { ...events, mission: missionUpdate('RUNNING', { executionId: 'exec-2', planId: 'plan-2' }) };
+    view.rerender(<App />);
+    expect(screen.getByText('Searching')).toBeInTheDocument();
+    expect(controls().getByRole('button', { name: 'Pause' })).toBeEnabled();
+  });
+
+  it('shows action buttons only in states accepted by the backend', () => {
+    events = { ...events, mission: missionUpdate('PREFLIGHT_CHECK') };
+    const view = render(<App />);
+    expect(controls().queryAllByRole('button')).toHaveLength(0);
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    view.rerender(<App />);
+    expect(controls().getAllByRole('button')).toHaveLength(1);
+    expect(controls().getByRole('button', { name: 'Continue search' })).toBeEnabled();
+  });
+});
+
+describe('operator-facing mission copy', () => {
+  it('does not imply an operator-requested interruption was unexpected', () => {
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    render(<App />);
+    expect(screen.getByText(/The search was interrupted/)).toBeInTheDocument();
+    expect(screen.queryByText(/stopped on its own/)).toBeNull();
+  });
+
+  it('does not describe natural RTL as an operator stop', () => {
+    events = { ...events, mission: missionUpdate('RETURNING_HOME') };
+    render(<App />);
+    expect(screen.getByText(/The aircraft is returning home/)).toBeInTheDocument();
+    expect(screen.queryByText(/The search was stopped/)).toBeNull();
+  });
+
+  it('gives a specific message when auto-takeoff failed to reach altitude', async () => {
+    mockFetch(409, {
+      detail: {
+        code: 'VEHICLE_NOT_READY',
+        message: 'The vehicle did not reach the required takeoff altitude in time.',
+        details: { targetAltitudeM: 25 },
+      },
+    });
+    events = { ...events, mission: missionUpdate('INTERRUPTED') };
+    render(<App />);
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Continue search' })));
+    expect(screen.getByRole('alert')).toHaveTextContent('did not reach takeoff altitude');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Check that it is connected, armed');
   });
 });

@@ -53,6 +53,7 @@ export const initialPlanningState: PlanningState = {
 
 export type PlanningAction =
   | { type: 'DEFINE_SEARCH_AREA' }
+  | { type: 'START_NEW_SEARCH' }
   | { type: 'ADD_VERTEX'; point: LatLon }
   | { type: 'CLOSE_POLYGON' }
   | { type: 'UNDO_LAST_POINT' }
@@ -113,6 +114,10 @@ export function planningReducer(state: PlanningState, action: PlanningAction): P
   switch (action.type) {
     case 'DEFINE_SEARCH_AREA':
       if (state.phase !== 'IDLE') return state;
+      return { ...initialPlanningState, phase: 'PLANNING' };
+
+    case 'START_NEW_SEARCH':
+      // The operator explicitly finished the old mission and chose a fresh drawing.
       return { ...initialPlanningState, phase: 'PLANNING' };
 
     case 'ADD_VERTEX':

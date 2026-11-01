@@ -28,9 +28,9 @@ describe('parseEvent', () => {
   });
 
   it('ignores message types not handled yet instead of failing', () => {
-    expect(parseEvent(JSON.stringify({ type: 'mission_update', data: {} }))).toEqual({
+    expect(parseEvent(JSON.stringify({ type: 'coverage_update', data: {} }))).toEqual({
       kind: 'unknown_type',
-      type: 'mission_update',
+      type: 'coverage_update',
     });
   });
 
@@ -45,5 +45,75 @@ describe('parseEvent', () => {
     ['snake_case backend field leaked', JSON.stringify({ type: 'telemetry_update', data: { latitude_deg: 1 } })],
   ])('rejects %s', (_label, raw) => {
     expect(parseEvent(raw).kind).toBe('invalid');
+  });
+});
+
+describe('parseEvent: mission_update', () => {
+  const data = {
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    missionState: 'RUNNING',
+    timestamp: '2026-10-26T20:00:00Z',
+    activeTarget: {
+      latitudeDeg: 30.2291,
+      longitudeDeg: -97.7555,
+      altitudeM: 25,
+      altitudeReference: 'HOME_RELATIVE',
+    },
+  };
+  const frame = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({ type: 'mission_update', data: { ...data, ...over } });
+
+  it('accepts a full update', () => {
+    const result = parseEvent(frame());
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.missionState).toBe('RUNNING');
+      expect(result.message.data.activeTarget?.altitudeM).toBe(25);
+      expect(result.message.data.runtimeError).toBeNull();
+    }
+  });
+
+  it('normalizes an omitted activeTarget to null', () => {
+    // exclude_none on the backend means the key is absent, not null.
+    const { activeTarget: _omitted, ...rest } = data;
+    const result = parseEvent(JSON.stringify({ type: 'mission_update', data: rest }));
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.activeTarget).toBeNull();
+    }
+  });
+
+  it('reads a runtime error when the backend reports one', () => {
+    const result = parseEvent(
+      frame({ runtimeError: { code: 'VEHICLE_NOT_READY', message: 'disarmed', details: { armed: false } } }),
+    );
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.runtimeError?.code).toBe('VEHICLE_NOT_READY');
+    }
+  });
+
+  it('rejects a mission state this build does not know', () => {
+    const result = parseEvent(frame({ missionState: 'LANDING' }));
+    expect(result.kind).toBe('invalid');
+  });
+
+  it('rejects a missing timestamp', () => {
+    const { timestamp: _omitted, ...rest } = data;
+    const result = parseEvent(JSON.stringify({ type: 'mission_update', data: rest }));
+    expect(result.kind).toBe('invalid');
+  });
+
+  it('rejects a target measured against another datum', () => {
+    const result = parseEvent(
+      frame({ activeTarget: { ...data.activeTarget, altitudeReference: 'AMSL' } }),
+    );
+    expect(result.kind).toBe('invalid');
+  });
+
+  it('still ignores types this build does not handle', () => {
+    const result = parseEvent(JSON.stringify({ type: 'coverage_update', data: {} }));
+    expect(result).toEqual({ kind: 'unknown_type', type: 'coverage_update' });
   });
 });

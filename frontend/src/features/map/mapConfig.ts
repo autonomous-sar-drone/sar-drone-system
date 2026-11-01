@@ -53,5 +53,6 @@ export const MAP_COLORS = {
   route: '#1f6feb',
   casing: '#ffffff',
   drone: '#15202b',
+  droneHeading: '#15202b',
   routeStart: '#17784a',
 } as const;

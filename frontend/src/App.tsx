@@ -1,23 +1,45 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { DroneViewPanel } from './features/camera/DroneViewPanel';
 import { DetectionsPanel } from './features/detections/DetectionsPanel';
 import { MapPanel } from './features/map/MapPanel';
 import { MissionControls } from './features/mission/MissionControls';
 import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
+import { useMissionCommands } from './features/mission/useMissionCommands';
 import { usePlanning } from './features/planning/usePlanning';
 import { TelemetryPanel } from './features/telemetry/TelemetryPanel';
-import { useTelemetry } from './features/telemetry/useTelemetry';
+import { useEvents } from './features/events/useEvents';
 import './dashboard.css';
 
 export default function App() {
-  const { reading, status, nowMs } = useTelemetry();
+  const { reading, status, nowMs, mission } = useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
+  const commands = useMissionCommands();
+  const [dismissedCompletedId, setDismissedCompletedId] = useState<string | null>(null);
+
+  // The backend keeps the terminal snapshot until a new preview is requested.
+  // Hide only the finished execution the operator chose to leave behind;
+  // a subsequent execution with a different id is always shown.
+  const visibleMission =
+    mission?.missionState === 'COMPLETED' && mission.executionId === dismissedCompletedId
+      ? null
+      : mission;
+
+  function startNewSearch() {
+    if (mission?.missionState !== 'COMPLETED') return;
+    setDismissedCompletedId(mission.executionId);
+    dispatch({ type: 'START_NEW_SEARCH' });
+    commands.dismissError();
+  }
 
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
+  const heading = reading?.data.headingDeg ?? null;
   const drone = useMemo(
-    () => (lat !== undefined && lon !== undefined ? { latitudeDeg: lat, longitudeDeg: lon } : null),
-    [lat, lon],
+    () =>
+      lat !== undefined && lon !== undefined
+        ? { latitudeDeg: lat, longitudeDeg: lon, headingDeg: heading }
+        : null,
+    [lat, lon, heading],
   );
 
   return (
@@ -29,10 +51,17 @@ export default function App() {
       <main className="dashboard">
         <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
-        <MissionStatusPanel planning={planning} />
+        <MissionStatusPanel planning={planning} mission={visibleMission} />
         <DroneViewPanel />
         <DetectionsPanel />
-        <MissionControls planning={planning} dispatch={dispatch} onGenerate={generate} />
+        <MissionControls
+          planning={planning}
+          dispatch={dispatch}
+          onGenerate={generate}
+          mission={visibleMission}
+          onStartNewSearch={startNewSearch}
+          commands={commands}
+        />
       </main>
     </>
   );
