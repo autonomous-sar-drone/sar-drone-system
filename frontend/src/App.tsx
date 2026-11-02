@@ -11,7 +11,7 @@ import { useEvents } from './features/events/useEvents';
 import './dashboard.css';
 
 export default function App() {
-  const { reading, status, nowMs, mission } = useEvents();
+  const { reading, status, nowMs, mission, vision } = useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
   const commands = useMissionCommands();
   const [dismissedCompletedId, setDismissedCompletedId] = useState<string | null>(null);
@@ -52,7 +52,7 @@ export default function App() {
         <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
         <MissionStatusPanel planning={planning} mission={visibleMission} />
-        <DroneViewPanel />
+        <DroneViewPanel vision={vision} />
         <DetectionsPanel />
         <MissionControls
           planning={planning}

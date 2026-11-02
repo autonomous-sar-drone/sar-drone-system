@@ -117,3 +117,67 @@ describe('parseEvent: mission_update', () => {
     expect(result).toEqual({ kind: 'unknown_type', type: 'coverage_update' });
   });
 });
+
+describe('parseEvent: vision_status', () => {
+  const data = {
+    sessionId: 'vision-session-abc123',
+    revision: 3,
+    timestamp: '2026-11-02T20:00:00.000Z',
+    camera: { state: 'LIVE', lastFrameAt: '2026-11-02T20:00:00.000Z' },
+    detector: { state: 'UNAVAILABLE', lastInferenceAt: null },
+    cameraOutageSeconds: null,
+    automaticRtlTriggered: false,
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'vision_status', data: d }));
+
+  it('reads a healthy status', () => {
+    const result = frame(data);
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.camera.state).toBe('LIVE');
+      expect(result.message.data.detector.lastInferenceAt).toBeNull();
+      expect(result.message.data.revision).toBe(3);
+    }
+  });
+
+  it('accepts the explicit nulls this event sends', () => {
+    // vision_status is serialized WITHOUT exclude_none, unlike the other two events.
+    const result = frame({ ...data, cameraOutageSeconds: null, camera: { state: 'STARTING', lastFrameAt: null } });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.cameraOutageSeconds).toBeNull();
+      expect(result.message.data.camera.lastFrameAt).toBeNull();
+    }
+  });
+
+  it('reads an outage with the automatic return home', () => {
+    const result = frame({
+      ...data,
+      camera: { state: 'UNAVAILABLE', lastFrameAt: '2026-11-02T19:59:00.000Z' },
+      cameraOutageSeconds: 61.5,
+      automaticRtlTriggered: true,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.cameraOutageSeconds).toBeCloseTo(61.5);
+      expect(result.message.data.automaticRtlTriggered).toBe(true);
+    }
+  });
+
+  it('rejects a health state the frontend does not know', () => {
+    const result = frame({ ...data, camera: { state: 'DEGRADED', lastFrameAt: null } });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'vision_status: camera.state is missing or unrecognized: DEGRADED',
+    });
+  });
+
+  it('rejects a missing automaticRtlTriggered rather than assuming false', () => {
+    const { automaticRtlTriggered: _omitted, ...rest } = data;
+    expect(frame(rest).kind).toBe('invalid');
+  });
+
+  it('rejects a non-numeric outage', () => {
+    expect(frame({ ...data, cameraOutageSeconds: 'a while' }).kind).toBe('invalid');
+  });
+});

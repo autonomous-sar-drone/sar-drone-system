@@ -28,7 +28,7 @@ function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateD
 }
 
 beforeEach(() => {
-  events = { reading: null, status: 'connecting', nowMs: 0, mission: null };
+  events = { reading: null, status: 'connecting', nowMs: 0, mission: null, vision: null };
 });
 
 /** WebGL isn't available in jsdom, so the map is replaced by a stub exposing the same callbacks. */
