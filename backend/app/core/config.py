@@ -35,3 +35,6 @@ LANDING_ALTITUDE_TOLERANCE_M: float = float(
 LANDING_SPEED_TOLERANCE_MPS: float = float(
     os.getenv("LANDING_SPEED_TOLERANCE_MPS", "0.75")
 )
+# camera producer connects to this independent TCP listener, not MAVLink
+CAMERA_RECEIVER_HOST: str = os.getenv("CAMERA_RECEIVER_HOST", "127.0.0.1")
+CAMERA_RECEIVER_PORT: int = int(os.getenv("CAMERA_RECEIVER_PORT", "8766"))

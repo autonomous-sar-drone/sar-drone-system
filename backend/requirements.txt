@@ -4,3 +4,4 @@ pytest-asyncio==1.4.0
 fastapi[standard]==0.115.13
 shapely==2.1.2
 pyproj==3.7.2
+Pillow==13.0.0

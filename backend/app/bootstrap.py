@@ -9,6 +9,8 @@ from app.core.config import (
     LANDING_ALTITUDE_TOLERANCE_M,
     LANDING_SPEED_TOLERANCE_MPS,
     MAVLINK_ENDPOINT,
+    CAMERA_RECEIVER_HOST,
+    CAMERA_RECEIVER_PORT,
     MAX_ROUTE_DISTANCE_M,
     MAX_TELEMETRY_AGE_S,
     MAX_TRANSIT_DISTANCE_M,
@@ -23,6 +25,7 @@ from app.runtime.mission_hub import MissionHub
 from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.mavlink_telemetry import create_mavlink_connection
 from app.vehicle.mavlink_vehicle import MavlinkVehicle
+from app.vision.camera_receiver import CameraReceiver
 
 
 @asynccontextmanager
@@ -31,6 +34,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     mission_hub = MissionHub()
     connection = create_mavlink_connection(MAVLINK_ENDPOINT)
     vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub)
+
+    camera_receiver = CameraReceiver(host=CAMERA_RECEIVER_HOST, port=CAMERA_RECEIVER_PORT)
 
     mission_service = MissionService(
         telemetry_hub=telemetry_hub,
@@ -56,13 +61,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mission_hub = mission_hub
     app.state.mission_service = mission_service
     app.state.vehicle = vehicle
+    app.state.camera_receiver = camera_receiver
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
         # to TelemetryHub, separate receivers could consume each other's messages
         await vehicle.start()
+        camera_receiver.start()
         yield
     finally:
         # stop mission monitoring before closing the vehicle connection
         await mission_service.shutdown()
+        camera_receiver.stop()
         await vehicle.stop()

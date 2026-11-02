@@ -1,0 +1,19 @@
+{
+  "controllers/ardupilot_vehicle_controller/webots_vehicle.py": {
+    "original": "b83948dbbccaf8668948ff46b35dcaad44c7f983e2e19a41c34942edaed0d638",
+    "patched": "37aecf2809394f54cc8a6768c3809e62a2340175382815282c5eddda74e16f02",
+    "patch_file": "webots_vehicle.patch"
+  },
+  "controllers/ardupilot_vehicle_controller/ardupilot_vehicle_controller.py": {
+    "original": "f7e4f7d60acee141e946a35771c350a7142a6c8f15454eb53ce1c3f951215789",
+    "patched": "de64ca6e1d921e0ddb59f6de597b291b9141a38a5ed824658b1cfb257086ef16",
+    "patch_file": "ardupilot_vehicle_controller.patch"
+  },
+  "worlds/iris_wsl.wbt": {
+    "original": "7b70dfad240e8ca4de6240549d6edc5adb7c336f0bc79a2f0e81e3a035341f67",
+    "normalized": "75919d694375036565f82b718e943cc1e233ca7be3cd651fa0dcb2bffc2bb57e"
+  },
+  "worlds/iris_wsl_camera.wbt": {
+    "sample_generated_sha256": "02a1372e1aa179fe017b3de7798303aaca8e90ff6c98145f12f4296f72d23cc3"
+  }
+}

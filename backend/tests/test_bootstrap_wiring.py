@@ -35,14 +35,27 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
     )
     monkeypatch.setattr(bootstrap, "MavlinkVehicle", FakeMavlinkVehicle)
 
+    class FakeCameraReceiver:
+        def __init__(self, host, port):
+            self.host = host
+            self.port = port
+
+        def start(self):
+            calls.append("camera_start")
+
+        def stop(self):
+            calls.append("camera_stop")
+
+    monkeypatch.setattr(bootstrap, "CameraReceiver", FakeCameraReceiver)
+
     app = FastAPI(lifespan=bootstrap.lifespan)
     from fastapi.testclient import TestClient
 
     with TestClient(app):
-        assert calls == ["vehicle_start"]
+        assert calls == ["vehicle_start", "camera_start"]
         assert app.state.mission_service._vehicle is app.state.vehicle
         assert app.state.vehicle.telemetry_hub is app.state.telemetry_hub
         assert app.state.mission_service._mission_hub is app.state.mission_hub
 
     # shutdown order matters because the receiver owns the MAVLink connection
-    assert calls == ["vehicle_start", "vehicle_stop", "connection_close"]
+    assert calls == ["vehicle_start", "camera_start", "camera_stop", "vehicle_stop", "connection_close"]
