@@ -11,6 +11,11 @@ from app.core.config import (
     MAVLINK_ENDPOINT,
     CAMERA_RECEIVER_HOST,
     CAMERA_RECEIVER_PORT,
+    CAMERA_STALE_AFTER_S,
+    CAMERA_STARTUP_GRACE_S,
+    CAMERA_STREAM_MAX_FPS,
+    CAMERA_STREAM_WIDTH_PX,
+    CAMERA_STREAM_JPEG_QUALITY,
     MAX_ROUTE_DISTANCE_M,
     MAX_TELEMETRY_AGE_S,
     MAX_TRANSIT_DISTANCE_M,
@@ -26,6 +31,7 @@ from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.mavlink_telemetry import create_mavlink_connection
 from app.vehicle.mavlink_vehicle import MavlinkVehicle
 from app.vision.camera_receiver import CameraReceiver
+from app.vision.vision_runtime import VisionRuntime
 
 
 @asynccontextmanager
@@ -36,6 +42,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub)
 
     camera_receiver = CameraReceiver(host=CAMERA_RECEIVER_HOST, port=CAMERA_RECEIVER_PORT)
+    vision_runtime = VisionRuntime(
+        camera_receiver, stale_after_s=CAMERA_STALE_AFTER_S,
+        startup_grace_s=CAMERA_STARTUP_GRACE_S, max_stream_fps=CAMERA_STREAM_MAX_FPS,
+        stream_width_px=CAMERA_STREAM_WIDTH_PX, stream_jpeg_quality=CAMERA_STREAM_JPEG_QUALITY,
+    )
 
     mission_service = MissionService(
         telemetry_hub=telemetry_hub,
@@ -62,15 +73,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mission_service = mission_service
     app.state.vehicle = vehicle
     app.state.camera_receiver = camera_receiver
+    app.state.vision_runtime = vision_runtime
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
         # to TelemetryHub, separate receivers could consume each other's messages
         await vehicle.start()
         camera_receiver.start()
+        await vision_runtime.start()
         yield
     finally:
         # stop mission monitoring before closing the vehicle connection
         await mission_service.shutdown()
+        await vision_runtime.stop()
         camera_receiver.stop()
         await vehicle.stop()

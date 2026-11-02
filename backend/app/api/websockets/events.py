@@ -6,6 +6,7 @@ from app.api.schemas.telemetry import telemetry_event_from_sample
 from app.api.schemas.mission_execution import mission_update_event_from_snapshot
 from app.runtime.mission_hub import MissionHub
 from app.runtime.telemetry_hub import TelemetryHub
+from app.vision.vision_runtime import VisionRuntime
 
 
 router = APIRouter()
@@ -26,6 +27,15 @@ async def events_websocket(websocket: WebSocket) -> None:
     else:
         mission_latest = None
 
+    vision_runtime: VisionRuntime | None = getattr(
+        websocket.app.state, "vision_runtime", None
+    )
+    vision_queue = None
+    if vision_runtime is not None:
+        vision_queue, vision_latest = vision_runtime.subscribe()
+    else:
+        vision_latest = None
+
     pending: set[asyncio.Task] = set()
     disconnect_wait: asyncio.Task | None = None
     try:
@@ -38,6 +48,12 @@ async def events_websocket(websocket: WebSocket) -> None:
         if mission_latest is not None:
             event = mission_update_event_from_snapshot(mission_latest)
             await websocket.send_json(event.model_dump(mode="json", by_alias=True, exclude_none=True))
+
+        if vision_latest is not None:
+            await websocket.send_json({
+                "type": "vision_status",
+                "data": vision_latest.model_dump(mode="json", by_alias=True),
+            })
 
         # incoming messages are only used to detect disconnects
         # mission commands still go through the HTTP API
@@ -53,7 +69,12 @@ async def events_websocket(websocket: WebSocket) -> None:
                 mission_wait = asyncio.create_task(mission_queue.get())
                 pending.add(mission_wait)
 
-            # one socket carries both event types, whichever changes first gets sent
+            vision_wait = None
+            if vision_queue is not None:
+                vision_wait = asyncio.create_task(vision_queue.get())
+                pending.add(vision_wait)
+
+            # one socket carries telemetry, mission and sparse vision status updates
             done, remaining = await asyncio.wait(
                 pending | {disconnect_wait},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -85,6 +106,12 @@ async def events_websocket(websocket: WebSocket) -> None:
                     event.model_dump(mode="json", by_alias=True, exclude_none=True)
                 )
 
+            if vision_wait is not None and vision_wait in done:
+                await websocket.send_json({
+                    "type": "vision_status",
+                    "data": vision_wait.result().model_dump(mode="json", by_alias=True),
+                })
+
     except WebSocketDisconnect:
         pass
     finally:
@@ -100,3 +127,5 @@ async def events_websocket(websocket: WebSocket) -> None:
         )
         if mission_hub is not None and mission_queue is not None:
             mission_hub.unsubscribe(mission_queue)
+        if vision_runtime is not None and vision_queue is not None:
+            vision_runtime.unsubscribe(vision_queue)
