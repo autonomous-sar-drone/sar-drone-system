@@ -51,6 +51,7 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
     class FakeVisionRuntime:
         def __init__(self, receiver, **kwargs):
             assert isinstance(receiver, FakeCameraReceiver)
+            self.session_id = "vision-session-test-bootstrap"
 
         async def start(self):
             calls.append("vision_start")
@@ -65,6 +66,8 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
 
     with TestClient(app):
         assert calls == ["vehicle_start", "camera_start", "vision_start"]
+        assert app.state.candidate_store.session_id == app.state.vision_runtime.session_id
+        assert app.state.candidate_store.collection() == (0, [])
         assert app.state.mission_service._vehicle is app.state.vehicle
         assert app.state.vehicle.telemetry_hub is app.state.telemetry_hub
         assert app.state.mission_service._mission_hub is app.state.mission_hub

@@ -32,6 +32,7 @@ from app.vehicle.mavlink_telemetry import create_mavlink_connection
 from app.vehicle.mavlink_vehicle import MavlinkVehicle
 from app.vision.camera_receiver import CameraReceiver
 from app.vision.vision_runtime import VisionRuntime
+from app.vision.candidate_store import CandidateStore
 
 
 @asynccontextmanager
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         startup_grace_s=CAMERA_STARTUP_GRACE_S, max_stream_fps=CAMERA_STREAM_MAX_FPS,
         stream_width_px=CAMERA_STREAM_WIDTH_PX, stream_jpeg_quality=CAMERA_STREAM_JPEG_QUALITY,
     )
+
+    candidate_store = CandidateStore(session_id=vision_runtime.session_id)
 
     mission_service = MissionService(
         telemetry_hub=telemetry_hub,
@@ -74,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.vehicle = vehicle
     app.state.camera_receiver = camera_receiver
     app.state.vision_runtime = vision_runtime
+    app.state.candidate_store = candidate_store
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
