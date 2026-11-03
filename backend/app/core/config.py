@@ -45,3 +45,15 @@ CAMERA_STARTUP_GRACE_S: float = float(os.getenv("CAMERA_STARTUP_GRACE_S", "3.0")
 CAMERA_STREAM_MAX_FPS: float = float(os.getenv("CAMERA_STREAM_MAX_FPS", "10.0"))
 CAMERA_STREAM_WIDTH_PX: int = int(os.getenv("CAMERA_STREAM_WIDTH_PX", "0"))  # 0 = source resolution
 CAMERA_STREAM_JPEG_QUALITY: int = int(os.getenv("CAMERA_STREAM_JPEG_QUALITY", "0"))  # 0 = passthrough
+
+# Optional YOLO person-only tracker; inference runs off the mission event loop.
+# Missing ultralytics/weights must not prevent telemetry or raw MJPEG streaming.
+VISION_DETECTOR_ENABLED: bool = os.getenv("VISION_DETECTOR_ENABLED", "true").lower() in ("1", "true", "yes")
+VISION_YOLO_MODEL: str = os.getenv("VISION_YOLO_MODEL", "yolo11n.pt")
+VISION_YOLO_TRACKER: str = os.getenv("VISION_YOLO_TRACKER", "botsort.yaml")
+VISION_YOLO_CONFIDENCE: float = float(os.getenv("VISION_YOLO_CONFIDENCE", "0.25"))
+VISION_YOLO_IMAGE_SIZE: int = int(os.getenv("VISION_YOLO_IMAGE_SIZE", "640"))
+VISION_YOLO_DEVICE: str = os.getenv("VISION_YOLO_DEVICE", "cpu")
+VISION_INFERENCE_MAX_FPS: float = float(os.getenv("VISION_INFERENCE_MAX_FPS", "5"))
+VISION_OVERLAY_MAX_AGE_S: float = float(os.getenv("VISION_OVERLAY_MAX_AGE_S", "0.35"))
+VISION_DETECTOR_STALE_AFTER_S: float = float(os.getenv("VISION_DETECTOR_STALE_AFTER_S", "3.0"))

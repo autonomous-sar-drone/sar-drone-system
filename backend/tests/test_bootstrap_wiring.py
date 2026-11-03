@@ -51,6 +51,8 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
     class FakeVisionRuntime:
         def __init__(self, receiver, **kwargs):
             assert isinstance(receiver, FakeCameraReceiver)
+            assert isinstance(kwargs["detector"], bootstrap.YoloPersonTracker)
+            assert kwargs["max_inference_fps"] == bootstrap.VISION_INFERENCE_MAX_FPS
             self.session_id = "vision-session-test-bootstrap"
 
         async def start(self):
@@ -60,6 +62,7 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
             calls.append("vision_stop")
 
     monkeypatch.setattr(bootstrap, "VisionRuntime", FakeVisionRuntime)
+    monkeypatch.setattr(bootstrap, "VISION_DETECTOR_ENABLED", True)
 
     app = FastAPI(lifespan=bootstrap.lifespan)
     from fastapi.testclient import TestClient

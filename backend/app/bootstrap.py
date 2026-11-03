@@ -16,6 +16,10 @@ from app.core.config import (
     CAMERA_STREAM_MAX_FPS,
     CAMERA_STREAM_WIDTH_PX,
     CAMERA_STREAM_JPEG_QUALITY,
+    VISION_DETECTOR_ENABLED, VISION_YOLO_MODEL, VISION_YOLO_TRACKER,
+    VISION_YOLO_CONFIDENCE, VISION_YOLO_IMAGE_SIZE, VISION_YOLO_DEVICE,
+    VISION_INFERENCE_MAX_FPS, VISION_OVERLAY_MAX_AGE_S,
+    VISION_DETECTOR_STALE_AFTER_S,
     MAX_ROUTE_DISTANCE_M,
     MAX_TELEMETRY_AGE_S,
     MAX_TRANSIT_DISTANCE_M,
@@ -33,6 +37,7 @@ from app.vehicle.mavlink_vehicle import MavlinkVehicle
 from app.vision.camera_receiver import CameraReceiver
 from app.vision.vision_runtime import VisionRuntime
 from app.vision.candidate_store import CandidateStore
+from app.vision.person_detector import YoloPersonTracker
 
 
 @asynccontextmanager
@@ -43,10 +48,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub)
 
     camera_receiver = CameraReceiver(host=CAMERA_RECEIVER_HOST, port=CAMERA_RECEIVER_PORT)
+    person_detector = YoloPersonTracker(
+        model_path=VISION_YOLO_MODEL, tracker=VISION_YOLO_TRACKER,
+        confidence=VISION_YOLO_CONFIDENCE, image_size=VISION_YOLO_IMAGE_SIZE,
+        device=VISION_YOLO_DEVICE,
+    ) if VISION_DETECTOR_ENABLED else None
     vision_runtime = VisionRuntime(
         camera_receiver, stale_after_s=CAMERA_STALE_AFTER_S,
         startup_grace_s=CAMERA_STARTUP_GRACE_S, max_stream_fps=CAMERA_STREAM_MAX_FPS,
         stream_width_px=CAMERA_STREAM_WIDTH_PX, stream_jpeg_quality=CAMERA_STREAM_JPEG_QUALITY,
+        detector=person_detector, max_inference_fps=VISION_INFERENCE_MAX_FPS,
+        overlay_max_age_s=VISION_OVERLAY_MAX_AGE_S,
+        detector_stale_after_s=VISION_DETECTOR_STALE_AFTER_S,
     )
 
     candidate_store = CandidateStore(session_id=vision_runtime.session_id)
