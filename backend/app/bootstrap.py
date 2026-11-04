@@ -41,6 +41,9 @@ from app.vision.vision_runtime import VisionRuntime
 from app.vision.candidate_store import CandidateStore
 from app.vision.person_detector import YoloPersonTracker
 from app.vision.candidate_publisher import CandidatePublisher, CandidatePublicationWorker
+from app.vehicle.pose_history import PoseHistory
+from app.vision.camera_geometry import load_camera_geometry
+from app.vision.person_localization import PersonLocalizer
 
 
 @asynccontextmanager
@@ -48,7 +51,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     telemetry_hub = TelemetryHub()
     mission_hub = MissionHub()
     connection = create_mavlink_connection(MAVLINK_ENDPOINT)
-    vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub)
+    pose_history = PoseHistory()
+    vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub,
+                             pose_history=pose_history)
+    localizer = PersonLocalizer(pose_history, load_camera_geometry())
 
     camera_receiver = CameraReceiver(host=CAMERA_RECEIVER_HOST, port=CAMERA_RECEIVER_PORT)
     person_detector = YoloPersonTracker(
@@ -70,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         candidate_store, confirmation_s=VISION_CANDIDATE_CONFIRMATION_S,
         grace_s=VISION_CANDIDATE_GRACE_S,
         min_observations=VISION_CANDIDATE_MIN_OBSERVATIONS,
+        localizer=localizer,
     )
     candidate_worker = CandidatePublicationWorker(vision_runtime, candidate_publisher)
 
@@ -100,6 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.camera_receiver = camera_receiver
     app.state.vision_runtime = vision_runtime
     app.state.candidate_store = candidate_store
+    app.state.pose_history = pose_history
     app.state.candidate_publisher = candidate_publisher
     app.state.candidate_worker = candidate_worker
 

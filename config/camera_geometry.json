@@ -1,0 +1,10 @@
+{
+  "mountForwardM": 0.32,
+  "mountLeftM": 0.0,
+  "mountUpM": 0.05,
+  "pitchDownDeg": 60.0,
+  "horizontalFovRad": 1.1,
+  "imageWidthPx": 640,
+  "imageHeightPx": 360,
+  "sourceId": "webots-iris"
+}

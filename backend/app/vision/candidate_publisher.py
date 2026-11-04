@@ -17,6 +17,7 @@ from app.vision.camera_frame import CapturedFrame
 from app.vision.candidate_store import CandidateCaptureMetadata, CandidateStore
 from app.vision.overlay import annotate_live_frame
 from app.vision.person_detector import PersonBox, TrackedFrame
+from app.vision.person_localization import PersonLocalizer
 
 LOG = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class CandidatePublisher:
         self, store: CandidateStore, *, confirmation_s: float = 1.0,
         grace_s: float = 2.0, min_observations: int = 2,
         max_active_encounters: int = 256,
+        localizer: PersonLocalizer | None = None,
     ) -> None:
         if not math.isfinite(confirmation_s) or confirmation_s <= 0:
             raise ValueError("confirmation_s must be finite and positive")
@@ -86,6 +88,7 @@ class CandidatePublisher:
         if min_observations < 2 or max_active_encounters < 1:
             raise ValueError("invalid encounter limits")
         self.store = store
+        self.localizer = localizer
         self.confirmation_ms = round(confirmation_s * 1000)
         self.grace_ms = round(grace_s * 1000)
         self.min_observations = min_observations
@@ -228,18 +231,26 @@ class CandidatePublisher:
                 simulation_time_s=frame.simulation_time_s,
                 horizontal_fov_rad=frame.horizontal_fov_rad,
             )
+            bounding_box = PixelBoundingBox(
+                x_px=box.x1, y_px=box.y1,
+                width_px=box.x2-box.x1, height_px=box.y2-box.y1,
+                frame_width_px=frame.width, frame_height_px=frame.height,
+            )
+            # Localization is supplemental; a valid sighting must still be
+            # published if its pose cannot be projected for any reason.
+            try:
+                location = self.localizer.estimate(frame, bounding_box) if self.localizer else None
+            except Exception:
+                LOG.exception("Candidate geolocation failed; publishing the candidate with null location")
+                location = None
             candidate = self.store.publish(
                 first_observed_at=_source_time(encounter.first_ms),
                 captured_at=_source_time(frame.capture_unix_ms),
                 confidence=box.confidence,
-                bounding_box=PixelBoundingBox(
-                    x_px=box.x1, y_px=box.y1,
-                    width_px=box.x2-box.x1, height_px=box.y2-box.y1,
-                    frame_width_px=frame.width, frame_height_px=frame.height,
-                ),
+                bounding_box=bounding_box,
                 snapshot_jpeg=snapshot,
                 capture_metadata=metadata,
-                estimated_location=None,  # Commit 6; never invent a position.
+                estimated_location=location,
             )
             encounter.candidate_id = candidate.candidate_id
 

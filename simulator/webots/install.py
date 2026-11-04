@@ -31,7 +31,7 @@ def digest(data: bytes) -> str:
 
 def prepare(ardupilot: Path):
     sys.path.insert(0, str(ROOT))
-    from world_camera_overlay import make_camera_world, normalize_sitl_address
+    from world_camera_overlay import make_camera_world, normalize_sitl_address, CAMERA_EXTENSION
 
     metadata = json.loads((ROOT / 'expected_upstream_sha256.json').read_text())
     base = ardupilot / ORIGINAL_WORLD
@@ -42,6 +42,10 @@ def prepare(ardupilot: Path):
     if normalized_hash != metadata['worlds/iris_wsl.wbt']['normalized']:
         raise ValueError('Existing iris_wsl.wbt differs from uploaded source, beyond SITL address. Refusing to generate new world.')
     camera_world = make_camera_world(original).encode()
+    # The previously installed camera world used a 0.70-rad mount. Permit
+    # exactly that known generated file to be upgraded; never overwrite a
+    # user-edited or foreign world on a guess.
+    legacy_camera_world = make_camera_world(original, extension=CAMERA_EXTENSION).encode()
 
     updated = {}
     # Run all patches in an isolated temporary directory before touching live files.
@@ -79,6 +83,8 @@ def prepare(ardupilot: Path):
         dest = ardupilot / rel
         if dest.exists():
             status = 'already installed' if dest.read_bytes() == content else None
+            if status is None and rel == NEW_WORLD and dest.read_bytes() == legacy_camera_world:
+                status = 'safe to patch (known version)'
             if status is None and rel not in tuple(UPSTREAM / x for x in CONTROLLERS):
                 raise ValueError(f'Unexpected existing file: {dest}. Not overwriting.')
             if status is None:

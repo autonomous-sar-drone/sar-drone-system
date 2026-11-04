@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import re
+import math
 import subprocess
 import sys
 
@@ -36,7 +37,8 @@ def test_world_uses_existing_flight_settings_and_attaches_downward_camera():
     match = re.search(r'rotation 0 1 0 ([0-9.]+)\s+width 640', world)
     assert match is not None
     # Webots Camera points along its local +X; positive Y rotation aims downward.
-    assert 0.0 < float(match.group(1)) < 1.57
+    assert float(match.group(1)) == pytest.approx(math.pi / 3, abs=1e-7)
+    assert 'translation 0.32 0 0.05' in world
 
 
 def test_webots_patch_reads_frames_after_robot_step_only():

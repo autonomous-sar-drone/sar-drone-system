@@ -15,7 +15,8 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
             calls.append("connection_close")
 
     class FakeMavlinkVehicle:
-        def __init__(self, connection, telemetry_hub) -> None:
+        def __init__(self, connection, telemetry_hub, pose_history=None) -> None:
+            assert pose_history is not None
             self.connection = connection
             self.telemetry_hub = telemetry_hub
 
@@ -81,6 +82,7 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
         assert calls == ["vehicle_start", "camera_start", "candidate_subscribe", "vision_start"]
         assert app.state.candidate_store.session_id == app.state.vision_runtime.session_id
         assert app.state.candidate_store.collection() == (0, [])
+        assert app.state.candidate_publisher.localizer.history is app.state.pose_history
         assert app.state.mission_service._vehicle is app.state.vehicle
         assert app.state.vehicle.telemetry_hub is app.state.telemetry_hub
         assert app.state.mission_service._mission_hub is app.state.mission_hub
