@@ -20,6 +20,8 @@ from app.core.config import (
     VISION_YOLO_CONFIDENCE, VISION_YOLO_IMAGE_SIZE, VISION_YOLO_DEVICE,
     VISION_INFERENCE_MAX_FPS, VISION_OVERLAY_MAX_AGE_S,
     VISION_DETECTOR_STALE_AFTER_S,
+    VISION_CANDIDATE_CONFIRMATION_S, VISION_CANDIDATE_GRACE_S,
+    VISION_CANDIDATE_MIN_OBSERVATIONS,
     MAX_ROUTE_DISTANCE_M,
     MAX_TELEMETRY_AGE_S,
     MAX_TRANSIT_DISTANCE_M,
@@ -38,6 +40,7 @@ from app.vision.camera_receiver import CameraReceiver
 from app.vision.vision_runtime import VisionRuntime
 from app.vision.candidate_store import CandidateStore
 from app.vision.person_detector import YoloPersonTracker
+from app.vision.candidate_publisher import CandidatePublisher, CandidatePublicationWorker
 
 
 @asynccontextmanager
@@ -63,6 +66,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     candidate_store = CandidateStore(session_id=vision_runtime.session_id)
+    candidate_publisher = CandidatePublisher(
+        candidate_store, confirmation_s=VISION_CANDIDATE_CONFIRMATION_S,
+        grace_s=VISION_CANDIDATE_GRACE_S,
+        min_observations=VISION_CANDIDATE_MIN_OBSERVATIONS,
+    )
+    candidate_worker = CandidatePublicationWorker(vision_runtime, candidate_publisher)
 
     mission_service = MissionService(
         telemetry_hub=telemetry_hub,
@@ -91,17 +100,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.camera_receiver = camera_receiver
     app.state.vision_runtime = vision_runtime
     app.state.candidate_store = candidate_store
+    app.state.candidate_publisher = candidate_publisher
+    app.state.candidate_worker = candidate_worker
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
         # to TelemetryHub, separate receivers could consume each other's messages
         await vehicle.start()
         camera_receiver.start()
+        candidate_worker.start()  # subscribe before first inference can be emitted
         await vision_runtime.start()
         yield
     finally:
         # stop mission monitoring before closing the vehicle connection
         await mission_service.shutdown()
         await vision_runtime.stop()
+        await candidate_worker.stop()
         camera_receiver.stop()
         await vehicle.stop()

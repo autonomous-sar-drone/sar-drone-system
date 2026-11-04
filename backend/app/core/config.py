@@ -57,3 +57,9 @@ VISION_YOLO_DEVICE: str = os.getenv("VISION_YOLO_DEVICE", "cpu")
 VISION_INFERENCE_MAX_FPS: float = float(os.getenv("VISION_INFERENCE_MAX_FPS", "5"))
 VISION_OVERLAY_MAX_AGE_S: float = float(os.getenv("VISION_OVERLAY_MAX_AGE_S", "0.35"))
 VISION_DETECTOR_STALE_AFTER_S: float = float(os.getenv("VISION_DETECTOR_STALE_AFTER_S", "3.0"))
+
+# In-memory sightings: confirm after approximately one second of associated
+# evidence; tolerate short tracker-ID changes/occlusions without duplicate cards.
+VISION_CANDIDATE_CONFIRMATION_S: float = float(os.getenv("VISION_CANDIDATE_CONFIRMATION_S", "1.0"))
+VISION_CANDIDATE_GRACE_S: float = float(os.getenv("VISION_CANDIDATE_GRACE_S", "2.0"))
+VISION_CANDIDATE_MIN_OBSERVATIONS: int = int(os.getenv("VISION_CANDIDATE_MIN_OBSERVATIONS", "2"))

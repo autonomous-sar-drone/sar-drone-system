@@ -55,6 +55,16 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
             assert kwargs["max_inference_fps"] == bootstrap.VISION_INFERENCE_MAX_FPS
             self.session_id = "vision-session-test-bootstrap"
 
+        def subscribe_detections(self):
+            import asyncio
+            calls.append("candidate_subscribe")
+            self._candidate_queue = asyncio.Queue(maxsize=16)
+            return self._candidate_queue
+
+        def unsubscribe_detections(self, queue):
+            assert queue is self._candidate_queue
+            calls.append("candidate_unsubscribe")
+
         async def start(self):
             calls.append("vision_start")
 
@@ -68,7 +78,7 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
     with TestClient(app):
-        assert calls == ["vehicle_start", "camera_start", "vision_start"]
+        assert calls == ["vehicle_start", "camera_start", "candidate_subscribe", "vision_start"]
         assert app.state.candidate_store.session_id == app.state.vision_runtime.session_id
         assert app.state.candidate_store.collection() == (0, [])
         assert app.state.mission_service._vehicle is app.state.vehicle
@@ -76,4 +86,4 @@ def test_bootstrap_uses_vehicle_receiver_and_stops_it(monkeypatch) -> None:
         assert app.state.mission_service._mission_hub is app.state.mission_hub
 
     # shutdown order matters because the receiver owns the MAVLink connection
-    assert calls == ["vehicle_start", "camera_start", "vision_start", "vision_stop", "camera_stop", "vehicle_stop", "connection_close"]
+    assert calls == ["vehicle_start", "camera_start", "candidate_subscribe", "vision_start", "vision_stop", "candidate_unsubscribe", "camera_stop", "vehicle_stop", "connection_close"]

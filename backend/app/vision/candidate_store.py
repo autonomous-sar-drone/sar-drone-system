@@ -31,6 +31,35 @@ class CandidateUpdate:
     candidate: DetectionCandidate
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateCaptureMetadata:
+    """Source-frame metadata for capture-time geolocation in Commit 6.
+
+    No aircraft pose is available from the camera packet. Commit 6 must supply
+    synchronized MAVLink position AND attitude history; do not substitute the
+    aircraft's pose at candidate publication time.
+    """
+    source_id: str
+    frame_id: int
+    capture_unix_ms: int
+    simulation_time_s: float | None
+    horizontal_fov_rad: float | None
+
+    def __post_init__(self) -> None:
+        if not self.source_id or len(self.source_id) > 128:
+            raise ValueError("invalid camera source")
+        if self.frame_id < 0 or self.capture_unix_ms <= 0:
+            raise ValueError("invalid source frame identity")
+        if self.simulation_time_s is not None and (
+            not math.isfinite(self.simulation_time_s) or self.simulation_time_s < 0
+        ):
+            raise ValueError("invalid simulation capture time")
+        if self.horizontal_fov_rad is not None and (
+            not math.isfinite(self.horizontal_fov_rad) or not 0 < self.horizontal_fov_rad < math.pi
+        ):
+            raise ValueError("invalid camera horizontal FOV")
+
+
 class CandidateNotFound(Exception):
     pass
 
@@ -52,6 +81,7 @@ class CandidateStore:
         self._next_number = 1
         self._by_id: dict[str, DetectionCandidate] = {}
         self._snapshots: dict[str, bytes] = {}
+        self._capture_metadata: dict[str, CandidateCaptureMetadata] = {}
         self._subscribers: set[asyncio.Queue[CandidateUpdate]] = set()
 
     def collection(self) -> tuple[int, list[DetectionCandidate]]:
@@ -66,6 +96,11 @@ class CandidateStore:
     def snapshot(self, candidate_id: str) -> bytes:
         self.get(candidate_id)
         return self._snapshots[candidate_id]
+
+    def capture_metadata(self, candidate_id: str) -> CandidateCaptureMetadata | None:
+        """Original source metadata, not a public wire-contract field."""
+        self.get(candidate_id)
+        return self._capture_metadata.get(candidate_id)
 
     def subscribe(self) -> asyncio.Queue[CandidateUpdate]:
         # A slow browser cannot grow memory without bound. Lost revisions cause
@@ -90,6 +125,7 @@ class CandidateStore:
         confidence: float, bounding_box: PixelBoundingBox,
         snapshot_jpeg: bytes, estimated_location: EstimatedPersonLocation | None,
         execution_id: str | None = None,
+        capture_metadata: CandidateCaptureMetadata | None = None,
     ) -> DetectionCandidate:
         """Called internally after evidence selection; not a public creation API."""
         first = _aware_utc(first_observed_at)
@@ -102,6 +138,12 @@ class CandidateStore:
             raise TypeError("bounding_box must be a PixelBoundingBox")
         if estimated_location is not None and not isinstance(estimated_location, EstimatedPersonLocation):
             raise TypeError("estimated_location must be an EstimatedPersonLocation or None")
+        if capture_metadata is not None:
+            if not isinstance(capture_metadata, CandidateCaptureMetadata):
+                raise TypeError("capture_metadata must be CandidateCaptureMetadata")
+            if (capture_metadata.capture_unix_ms != round(captured.timestamp() * 1000) or
+                capture_metadata.frame_id < 0 or not capture_metadata.source_id):
+                raise ValueError("capture metadata disagrees with snapshot timestamp")
         # The selected annotated image is already prepared by the caller. Reject
         # missing/non-JPEG bytes; never publish an empty/broken snapshot URL.
         if not isinstance(snapshot_jpeg, bytes) or not snapshot_jpeg.startswith(b"\xff\xd8") or not snapshot_jpeg.endswith(b"\xff\xd9"):
@@ -119,6 +161,8 @@ class CandidateStore:
         self._next_number += 1
         self._by_id[candidate_id] = candidate
         self._snapshots[candidate_id] = snapshot_jpeg
+        if capture_metadata is not None:
+            self._capture_metadata[candidate_id] = capture_metadata
         self._publish_update(candidate)
         return candidate
 
