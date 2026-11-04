@@ -28,7 +28,7 @@ function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateD
 }
 
 beforeEach(() => {
-  events = { reading: null, status: 'connecting', nowMs: 0, mission: null };
+  events = { reading: null, status: 'connecting', nowMs: 0, mission: null, vision: null, detection: null };
 });
 
 /** WebGL isn't available in jsdom, so the map is replaced by a stub exposing the same callbacks. */
@@ -62,10 +62,29 @@ const plan = {
   planningUsed: { searchAltitudeM: 25, laneSpacingM: 20 },
 };
 
+const EMPTY_DETECTIONS = { sessionId: 'test-session', revision: 0, candidates: [] };
+
+/**
+ * App loads the detection collection on mount, so every stub has to answer that
+ * endpoint. Only the other endpoints get the status and body under test.
+ */
 function mockFetch(status: number, body: unknown) {
-  const fn = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+  const fn = vi.fn(async (url: string) => {
+    if (url === '/api/detections') {
+      return new Response(JSON.stringify(EMPTY_DETECTIONS), { status: 200 });
+    }
+    return new Response(JSON.stringify(body), { status });
+  });
   vi.stubGlobal('fetch', fn);
   return fn;
+}
+
+/** Find a call by endpoint, so an unrelated request cannot shift an index. */
+function callTo(fn: { mock: { calls: unknown[] } }, path: string): [string, RequestInit] {
+  const calls = fn.mock.calls as unknown as [string, RequestInit][];
+  const found = calls.find(([url]) => url === path);
+  if (!found) throw new Error(`No request was made to ${path}`);
+  return found;
 }
 
 const controls = () => within(screen.getByRole('toolbar', { name: 'Mission controls' }));
@@ -110,7 +129,7 @@ describe('search area and route preview flow', () => {
 
     await act(async () => fireEvent.click(generate));
 
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const body = JSON.parse(callTo(fetchMock, '/api/routes/preview')[1].body as string);
     expect(body).toEqual({ searchArea: { vertices: SQUARE } });
     expect(map()).toHaveAttribute('data-route-waypoints', '2');
     expect(map()).toHaveAttribute('data-mode', 'locked');
@@ -184,8 +203,7 @@ describe('live mission controls', () => {
     render(<App />);
 
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Pause' })));
-    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('/api/missions/exec-1/pause');
+    expect(callTo(fetchMock, '/api/missions/exec-1/pause')).toBeTruthy();
   });
 
   it('shows a rejected command without moving the state the backend owns', async () => {
@@ -244,6 +262,9 @@ describe('new search after completed execution', () => {
           executionId: 'exec-2', planId: 'plan-2', missionState: 'RUNNING', activeTarget: null,
         }), { status: 200 });
       }
+      if (url === '/api/detections') {
+        return new Response(JSON.stringify(EMPTY_DETECTIONS), { status: 200 });
+      }
       throw new Error(`Unexpected endpoint: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -265,8 +286,9 @@ describe('new search after completed execution', () => {
 
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Commence mission' })));
     const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
-    expect(calls.map(([url]) => url)).toEqual(['/api/routes/preview', '/api/missions/commence']);
-    expect(JSON.parse(calls[1][1].body as string)).toEqual({ planId: 'plan-2' });
+    const missionCalls = calls.map(([url]) => url).filter((url) => url !== '/api/detections');
+    expect(missionCalls).toEqual(['/api/routes/preview', '/api/missions/commence']);
+    expect(JSON.parse(callTo(fetchMock, '/api/missions/commence')[1].body as string)).toEqual({ planId: 'plan-2' });
     // The HTTP response isn't authoritative for UI mission state; only WS updates are.
     expect(screen.getByText('Plan ready')).toBeInTheDocument();
   });

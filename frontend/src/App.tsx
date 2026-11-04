@@ -5,15 +5,17 @@ import { MapPanel } from './features/map/MapPanel';
 import { MissionControls } from './features/mission/MissionControls';
 import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
 import { useMissionCommands } from './features/mission/useMissionCommands';
+import { useDetections } from './features/detections/useDetections';
 import { usePlanning } from './features/planning/usePlanning';
 import { TelemetryPanel } from './features/telemetry/TelemetryPanel';
 import { useEvents } from './features/events/useEvents';
 import './dashboard.css';
 
 export default function App() {
-  const { reading, status, nowMs, mission } = useEvents();
+  const { reading, status, nowMs, mission, vision, detection } = useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
   const commands = useMissionCommands();
+  const detections = useDetections(detection);
   const [dismissedCompletedId, setDismissedCompletedId] = useState<string | null>(null);
 
   // The backend keeps the terminal snapshot until a new preview is requested.
@@ -52,8 +54,8 @@ export default function App() {
         <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
         <MissionStatusPanel planning={planning} mission={visibleMission} />
-        <DroneViewPanel />
-        <DetectionsPanel />
+        <DroneViewPanel vision={vision} />
+        <DetectionsPanel detections={detections} nowMs={nowMs} />
         <MissionControls
           planning={planning}
           dispatch={dispatch}
