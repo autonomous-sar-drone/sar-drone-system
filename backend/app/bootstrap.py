@@ -13,6 +13,8 @@ from app.core.config import (
     CAMERA_RECEIVER_PORT,
     CAMERA_STALE_AFTER_S,
     CAMERA_STARTUP_GRACE_S,
+    CAMERA_RTL_OUTAGE_S,
+    CAMERA_WATCHDOG_POLL_S,
     CAMERA_STREAM_MAX_FPS,
     CAMERA_STREAM_WIDTH_PX,
     CAMERA_STREAM_JPEG_QUALITY,
@@ -38,6 +40,7 @@ from app.vehicle.mavlink_telemetry import create_mavlink_connection
 from app.vehicle.mavlink_vehicle import MavlinkVehicle
 from app.vision.camera_receiver import CameraReceiver
 from app.vision.vision_runtime import VisionRuntime
+from app.vision.camera_safety import CameraSafetyWatchdog
 from app.vision.candidate_store import CandidateStore
 from app.vision.person_detector import YoloPersonTracker
 from app.vision.candidate_publisher import CandidatePublisher, CandidatePublicationWorker
@@ -97,6 +100,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         takeoff_timeout_s=TAKEOFF_TIMEOUT_S,
         landing_altitude_tolerance_m=LANDING_ALTITUDE_TOLERANCE_M,
         landing_speed_tolerance_mps=LANDING_SPEED_TOLERANCE_MPS,
+        camera_available=vision_runtime.camera_ready,
+    )
+    camera_watchdog = CameraSafetyWatchdog(
+        vision_runtime, mission_service,
+        outage_after_s=CAMERA_RTL_OUTAGE_S,
+        poll_period_s=CAMERA_WATCHDOG_POLL_S,
     )
 
     # share these instances between the HTTP routes, WebSocket, and mission monitor
@@ -110,6 +119,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pose_history = pose_history
     app.state.candidate_publisher = candidate_publisher
     app.state.candidate_worker = candidate_worker
+    app.state.camera_watchdog = camera_watchdog
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
@@ -118,9 +128,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         camera_receiver.start()
         candidate_worker.start()  # subscribe before first inference can be emitted
         await vision_runtime.start()
+        camera_watchdog.start()
         yield
     finally:
-        # stop mission monitoring before closing the vehicle connection
+        # stop the safety observer before stopping mission/vehicle control
+        await camera_watchdog.stop()
         await mission_service.shutdown()
         await vision_runtime.stop()
         await candidate_worker.stop()

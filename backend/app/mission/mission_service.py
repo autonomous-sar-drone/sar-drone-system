@@ -1,11 +1,11 @@
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import uuid4
 
-from app.domain.models.mission_execution import MissionExecution, ResumeCheckpoint
+from app.domain.models.mission_execution import MissionExecution, ResumeCheckpoint, InterruptionReason
 from app.domain.models.mission_plan import MissionPlan
 from app.domain.models.mission_state import MissionState
 from app.domain.models.route import AltitudeReference, PlanningSettings, Waypoint
@@ -63,9 +63,12 @@ class MissionService:
         landing_altitude_tolerance_m: float = 0.75,
         landing_speed_tolerance_mps: float = 0.75,
         mission_hub: MissionHub | None = None,
+        camera_available: Callable[[], bool] | None = None,
     ) -> None:
         self._telemetry_hub = telemetry_hub
         self._mission_hub = mission_hub
+        # The production bootstrap provides camera health. Optional for older service tests.
+        self._camera_available = camera_available
         self._past_executions: list[MissionExecution] = []
         self._active_target_sent_at_utc: datetime | None = None
         self._default_planning_settings = default_planning_settings
@@ -241,6 +244,18 @@ class MissionService:
             self._resuming_to_checkpoint = False
             self._background_execution_error = None
 
+            # Camera availability is a preflight guard, before any flight command.
+            # A rejection must not leave an execution or telemetry subscription behind.
+            try:
+                self._require_camera_ready()
+            except MissionExecutionError:
+                self._set_state(MissionState.PLANNING)
+                self._current_execution = None
+                if self._mission_hub is not None:
+                    self._mission_hub.clear()
+                await self._telemetry_hub.unsubscribe(telemetry_queue)
+                raise
+
             self._start_execution_monitor(
                 execution_id=execution.execution_id,
                 telemetry_queue=telemetry_queue,
@@ -255,14 +270,18 @@ class MissionService:
                     search_altitude_m=plan.planning_settings.search_altitude_m,
                 )
 
+                # A long takeoff may outlast the last healthy frame. Check again
+                # before beginning the coverage route; recovery handles airborne RTL.
+                self._require_camera_ready()
                 first_target = plan.route.waypoints[0]
                 await self._call_vehicle(vehicle.go_to(first_target))
-            except MissionExecutionError:
+            except MissionExecutionError as error:
                 await self._recover_failed_execution_setup(
                     execution=execution,
                     vehicle=vehicle,
                     grounded_state=MissionState.PLANNING,
                     discard_execution_when_grounded=True,
+                    interruption_reason=self._camera_reason_from_error(error),
                 )
                 raise
 
@@ -317,42 +336,67 @@ class MissionService:
         async with self._action_lock:
             # stop still needs to allow RTL after a guidance error
             execution = self._require_current_execution(execution_id)
-
             if execution.state not in {MissionState.RUNNING, MissionState.PAUSED}:
                 self._raise_action_not_allowed("stop")
-
-            vehicle = self._require_ready_vehicle()
-            _, latest = await self._telemetry_hub.get_latest()
-            telemetry = self._validate_execution_telemetry(latest)
-
-            # save where the aircraft actually stopped and which search target
-            # it was following, continue needs both pieces
-            resume_target = execution.active_target
-
-            # during recovery the checkpoint is temporarily the active target
-            # stopping again should still remember the unfinished search waypoint
-            if (
-                self._resuming_to_checkpoint
-                and execution.resume_checkpoint is not None
-                and execution.resume_checkpoint.active_target is not None
-            ):
-                resume_target = execution.resume_checkpoint.active_target
-
-            execution.resume_checkpoint = ResumeCheckpoint(
-                telemetry=telemetry,
-                active_target=resume_target,
-            )
-
-            # wait for RTL confirmation before reporting RETURNING_HOME
-            await self._call_vehicle(vehicle.return_to_launch())
-
-            execution.active_target = None
-            self._resuming_to_checkpoint = False
-            self._return_terminal_state = MissionState.INTERRUPTED
-            self._background_execution_error = None
-            self._set_state(MissionState.RETURNING_HOME)
-
+            await self._interrupt_execution_locked(execution, "OPERATOR_STOP")
             return execution
+
+    async def interrupt_due_to_camera_loss(self) -> bool:
+        """Attempt one controlled interruption if a search is still active.
+
+        The watchdog does not own MAVLink control. The same action lock as Stop
+        prevents duplicate RTL when an operator action is already in progress.
+        """
+        async with self._action_lock:
+            execution = self._current_execution
+            if execution is None or execution.state not in {
+                MissionState.RUNNING, MissionState.PAUSED,
+            }:
+                return False
+            try:
+                await self._interrupt_execution_locked(execution, "CAMERA_UNAVAILABLE")
+            except MissionExecutionError as error:
+                # No state transition to RETURNING_HOME without RTL confirmation.
+                # Publish a truthful error so a disconnected aircraft is not
+                # reported as safely returning.
+                self._report_background_error(error)
+                raise
+            return True
+
+    async def _interrupt_execution_locked(
+        self, execution: MissionExecution, reason: InterruptionReason,
+    ) -> None:
+        vehicle = self._require_ready_vehicle()
+        _, latest = await self._telemetry_hub.get_latest()
+        telemetry = self._validate_execution_telemetry(latest)
+
+        # save where the aircraft actually stopped and which search target
+        # it was following, continue needs both pieces
+        resume_target = execution.active_target
+
+        # during recovery the checkpoint is temporarily the active target
+        # stopping again should still remember the unfinished search waypoint
+        if (
+            self._resuming_to_checkpoint
+            and execution.resume_checkpoint is not None
+            and execution.resume_checkpoint.active_target is not None
+        ):
+            resume_target = execution.resume_checkpoint.active_target
+
+        execution.resume_checkpoint = ResumeCheckpoint(
+            telemetry=telemetry,
+            active_target=resume_target,
+        )
+
+        # wait for RTL confirmation before reporting RETURNING_HOME
+        await self._call_vehicle(vehicle.return_to_launch())
+
+        execution.active_target = None
+        execution.interruption_reason = reason
+        self._resuming_to_checkpoint = False
+        self._return_terminal_state = MissionState.INTERRUPTED
+        self._background_execution_error = None
+        self._set_state(MissionState.RETURNING_HOME)
 
     async def continue_mission(self, execution_id: str) -> MissionExecution:
         async with self._action_lock:
@@ -393,11 +437,22 @@ class MissionService:
             self._resuming_to_checkpoint = False
             self._background_execution_error = None
 
+            # Camera guard runs while the mission is in PREFLIGHT_CHECK, before
+            # sending GUIDED, arm or takeoff. Preserve the previous checkpoint
+            # and interruption cause if the check rejects Continue.
+            try:
+                self._require_camera_ready()
+            except MissionExecutionError:
+                self._return_terminal_state = MissionState.INTERRUPTED
+                self._set_state(MissionState.INTERRUPTED)
+                raise
+
             try:
                 await self._prepare_vehicle_for_search(
                     vehicle=vehicle,
                     search_altitude_m=plan.planning_settings.search_altitude_m,
                 )
+                self._require_camera_ready()
 
                 # fly back to the recorded interruption position first
                 # no need to replay the earlier part of the route
@@ -409,18 +464,20 @@ class MissionService:
                 )
 
                 await self._call_vehicle(vehicle.go_to(checkpoint_target))
-            except MissionExecutionError:
+            except MissionExecutionError as error:
                 await self._recover_failed_execution_setup(
                     execution=execution,
                     vehicle=vehicle,
                     grounded_state=MissionState.INTERRUPTED,
                     discard_execution_when_grounded=False,
+                    interruption_reason=self._camera_reason_from_error(error),
                 )
                 raise
 
             execution.active_target = checkpoint_target
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = True
+            execution.interruption_reason = None
             self._set_state(MissionState.RUNNING)
 
             return execution
@@ -431,6 +488,7 @@ class MissionService:
         vehicle: VehicleControl,
         grounded_state: MissionState,
         discard_execution_when_grounded: bool,
+        interruption_reason: InterruptionReason | None = None,
     ) -> None:
         """Recover from a Commence/Continue failure without leaving stale setup state."""
         status = vehicle.get_status()
@@ -443,10 +501,12 @@ class MissionService:
             except MissionExecutionError as recovery_error:
                 # if RTL cannot be confirmed, keep the error instead of guessing
                 # which state the aircraft ended up in
-                self._background_execution_error = recovery_error
+                self._report_background_error(recovery_error)
                 return
 
             execution.active_target = None
+            if interruption_reason is not None:
+                execution.interruption_reason = interruption_reason
             self._resuming_to_checkpoint = False
             self._return_terminal_state = MissionState.INTERRUPTED
             self._background_execution_error = None
@@ -889,6 +949,20 @@ class MissionService:
             )
 
         return execution
+
+    def _require_camera_ready(self) -> None:
+        if self._camera_available is not None and not self._camera_available():
+            raise MissionExecutionError(
+                code=MissionExecutionErrorCode.VEHICLE_NOT_READY,
+                message="The camera source is unavailable for a search mission.",
+                details={"reason": "CAMERA_UNAVAILABLE"},
+            )
+
+    @staticmethod
+    def _camera_reason_from_error(error: MissionExecutionError) -> InterruptionReason | None:
+        if error.details and error.details.get("reason") == "CAMERA_UNAVAILABLE":
+            return "CAMERA_UNAVAILABLE"
+        return None
 
     def _require_ready_vehicle(self) -> VehicleControl:
         vehicle = self._vehicle

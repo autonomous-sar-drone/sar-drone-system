@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.domain.models.mission_execution import MissionExecution
+from app.domain.models.mission_execution import MissionExecution, InterruptionReason
 from app.domain.models.mission_state import MissionState
 from app.domain.models.route import AltitudeReference
 from app.runtime.mission_hub import MissionSnapshot
@@ -29,6 +29,9 @@ class MissionExecutionResponse(BaseModel):
     active_target: ActiveTargetResponse | None = Field(
         serialization_alias="activeTarget"
     )
+    interruption_reason: InterruptionReason | None = Field(
+        default=None, serialization_alias="interruptionReason"
+    )
 
 
 # the frontend only needs the current mission state and target, not the full history
@@ -50,6 +53,7 @@ def mission_execution_response_from_domain(
         plan_id=execution.plan_id,
         mission_state=execution.state,
         active_target=active_target,
+        interruption_reason=execution.interruption_reason,
     )
 
 class RuntimeErrorResponse(BaseModel):
@@ -89,6 +93,7 @@ def mission_update_event_from_snapshot(snapshot: MissionSnapshot) -> MissionUpda
             plan_id=snapshot.plan_id,
             mission_state=snapshot.state,
             active_target=active_target,
+            interruption_reason=snapshot.interruption_reason,
             runtime_error=RuntimeErrorResponse(
                 code=snapshot.runtime_error.code,
                 message=snapshot.runtime_error.message,

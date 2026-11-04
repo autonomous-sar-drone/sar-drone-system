@@ -89,7 +89,7 @@ class VisionRuntime:
         self._render_lock = asyncio.Lock()
         self._detector_task: asyncio.Task | None = None
         self._status_revision = 0
-        self._rtl_triggered = False  # the mission watchdog is introduced in Commit 7
+        self._rtl_triggered = False  # camera-loss attempt, not flight-mode confirmation
         self._subscribers: set[asyncio.Queue[VisionStatus]] = set()
         self._frame_condition = asyncio.Condition()
         self._stream_version = 0
@@ -101,6 +101,27 @@ class VisionRuntime:
     @property
     def camera_state(self) -> str:
         return self._camera_state
+
+    def camera_ready(self) -> bool:
+        """Authoritative source-frame freshness, independent of browser/YOLO."""
+        if self._started_at_s is None:
+            return False
+        _, _, arrived_s = self.receiver.stats()
+        return arrived_s is not None and 0 <= time.monotonic() - arrived_s <= self.stale_after_s
+
+    def camera_source_age_s(self) -> float | None:
+        """Total elapsed time since last arrival (or startup if none received)."""
+        if self._started_at_s is None:
+            return None
+        _, _, arrived_s = self.receiver.stats()
+        base_s = arrived_s if arrived_s is not None else self._started_at_s
+        return max(0.0, time.monotonic() - base_s)
+
+    def set_automatic_rtl_triggered(self, triggered: bool) -> None:
+        if self._rtl_triggered != triggered:
+            self._rtl_triggered = triggered
+            self._status_revision += 1
+            self._notify_status()
 
     def status(self) -> VisionStatus:
         now_s = time.monotonic()

@@ -42,6 +42,8 @@ CAMERA_RECEIVER_PORT: int = int(os.getenv("CAMERA_RECEIVER_PORT", "8766"))
 # Health uses backend frame arrival, not browser stream connectivity.
 CAMERA_STALE_AFTER_S: float = float(os.getenv("CAMERA_STALE_AFTER_S", "2.5"))
 CAMERA_STARTUP_GRACE_S: float = float(os.getenv("CAMERA_STARTUP_GRACE_S", "3.0"))
+CAMERA_RTL_OUTAGE_S: float = float(os.getenv("CAMERA_RTL_OUTAGE_S", "5.0"))
+CAMERA_WATCHDOG_POLL_S: float = float(os.getenv("CAMERA_WATCHDOG_POLL_S", "0.2"))
 CAMERA_STREAM_MAX_FPS: float = float(os.getenv("CAMERA_STREAM_MAX_FPS", "10.0"))
 CAMERA_STREAM_WIDTH_PX: int = int(os.getenv("CAMERA_STREAM_WIDTH_PX", "0"))  # 0 = source resolution
 CAMERA_STREAM_JPEG_QUALITY: int = int(os.getenv("CAMERA_STREAM_JPEG_QUALITY", "0"))  # 0 = passthrough
