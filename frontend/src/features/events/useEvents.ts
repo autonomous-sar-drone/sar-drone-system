@@ -4,6 +4,7 @@ import { config } from '../../core/config';
 import type { MissionUpdateData } from '../../types/mission';
 import type { TelemetryReading } from '../../types/telemetry';
 import type { VisionStatus } from '../../types/vision';
+import type { DetectionUpdateData } from '../../types/detections';
 import { deriveLinkStatus, type LinkStatus } from '../telemetry/linkStatus';
 
 /**
@@ -19,6 +20,8 @@ export interface EventsState {
   mission: MissionUpdateData | null;
   /** Latest vision_status, or null before the first one arrives. */
   vision: VisionStatus | null;
+  /** Most recent detection_update. useDetections reconciles these into a list. */
+  detection: DetectionUpdateData | null;
 }
 
 /** Re-render on an interval so "stale" and "last update" stay current with no new messages. */
@@ -38,6 +41,7 @@ export function useEvents(
   const [reading, setReading] = useState<TelemetryReading | null>(null);
   const [mission, setMission] = useState<MissionUpdateData | null>(null);
   const [vision, setVision] = useState<VisionStatus | null>(null);
+  const [detection, setDetection] = useState<DetectionUpdateData | null>(null);
   const [socketState, setSocketState] = useState<SocketState>('connecting');
   const nowMs = useNow(500);
 
@@ -56,6 +60,10 @@ export function useEvents(
         } else if (message.type === 'mission_update') {
           // The backend owns mission state; we only ever reflect the newest snapshot.
           setMission(message.data);
+        } else if (message.type === 'detection_update') {
+          // Only the newest is held here; useDetections spots revision gaps and
+          // refetches, so an update lost between renders is still recovered.
+          setDetection(message.data);
         } else if (message.type === 'vision_status') {
           // revision only ever increases, so an out-of-order frame is dropped
           // rather than moving the panel backwards.
@@ -71,5 +79,5 @@ export function useEvents(
 
   // Last known values are deliberately kept when the link goes stale or offline (ST-016).
   const status = deriveLinkStatus(socketState, reading?.receivedAtMs ?? null, nowMs, staleMs);
-  return { reading, status, nowMs, mission, vision };
+  return { reading, status, nowMs, mission, vision, detection };
 }

@@ -1,3 +1,5 @@
+import { parseCandidate } from './detectionsClient';
+import type { DetectionUpdateData } from '../types/detections';
 import type { EventMessage } from '../types/events';
 import {
   MISSION_STATES,
@@ -181,6 +183,15 @@ function parseVisionStatus(raw: unknown): VisionStatus | string {
   };
 }
 
+function parseDetectionData(raw: unknown): DetectionUpdateData | string {
+  if (!isObj(raw)) return 'data is not an object';
+  if (typeof raw.sessionId !== 'string') return 'sessionId is missing or not a string';
+  if (!isFiniteNumber(raw.revision) || raw.revision < 0) return 'revision is missing or negative';
+  const candidate = parseCandidate(raw.candidate);
+  if (candidate === null) return 'candidate is missing or does not match the contract';
+  return { sessionId: raw.sessionId, revision: raw.revision, candidate };
+}
+
 /** Parse one raw WebSocket frame. Never throws. */
 export function parseEvent(raw: string): ParseResult {
   let json: unknown;
@@ -212,6 +223,11 @@ export function parseEvent(raw: string): ParseResult {
       const data = parseVisionStatus(msg.data);
       if (typeof data === 'string') return { kind: 'invalid', reason: `vision_status: ${data}` };
       return { kind: 'ok', message: { type: 'vision_status', data } };
+    }
+    case 'detection_update': {
+      const data = parseDetectionData(msg.data);
+      if (typeof data === 'string') return { kind: 'invalid', reason: `detection_update: ${data}` };
+      return { kind: 'ok', message: { type: 'detection_update', data } };
     }
     default:
       return { kind: 'unknown_type', type: msg.type };

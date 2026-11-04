@@ -181,3 +181,45 @@ describe('parseEvent: vision_status', () => {
     expect(frame({ ...data, cameraOutageSeconds: 'a while' }).kind).toBe('invalid');
   });
 });
+
+describe('parseEvent: detection_update', () => {
+  const candidate = {
+    candidateId: 'cand-1',
+    candidateNumber: 1,
+    executionId: null,
+    status: 'PENDING',
+    firstObservedAt: '2026-11-04T15:00:00.000Z',
+    capturedAt: '2026-11-04T15:00:01.000Z',
+    publishedAt: '2026-11-04T15:00:02.000Z',
+    reviewedAt: null,
+    confidence: 0.91,
+    boundingBox: {
+      xPx: 10, yPx: 20, widthPx: 30, heightPx: 40, frameWidthPx: 1280, frameHeightPx: 720,
+    },
+    estimatedLocation: null,
+    snapshotUrl: '/api/detections/cand-1/snapshot',
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'detection_update', data: d }));
+
+  it('reads a candidate update', () => {
+    const result = frame({ sessionId: 's1', revision: 7, candidate });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'detection_update') {
+      expect(result.message.data.revision).toBe(7);
+      expect(result.message.data.candidate.candidateId).toBe('cand-1');
+      expect(result.message.data.candidate.estimatedLocation).toBeNull();
+    }
+  });
+
+  it('rejects an update whose candidate does not match the contract', () => {
+    const result = frame({ sessionId: 's1', revision: 7, candidate: { candidateId: 'x' } });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'detection_update: candidate is missing or does not match the contract',
+    });
+  });
+
+  it('rejects a missing revision', () => {
+    expect(frame({ sessionId: 's1', candidate }).kind).toBe('invalid');
+  });
+});
