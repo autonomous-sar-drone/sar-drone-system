@@ -6,9 +6,11 @@ import type { GeoJSONSource, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useEffect, useRef, useState } from 'react';
+import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import type { EditMode } from '../planning/planningState';
 import { canAppendVertex, canClose, type LatLon } from '../searchArea/geometry';
+import { detectionFeatures } from './detectionMarkers';
 import { headingSegment, type DronePose } from './headingIndicator';
 import { INITIAL_ZOOM, MAP_COLORS, SNAP_PX, initialCenter, mapStyle } from './mapConfig';
 
@@ -22,6 +24,8 @@ export interface MapViewProps {
   /** Read-only. Fed from planning state's currentRoute, never edited here. */
   route: Route | null;
   drone: DronePose | null;
+  /** Reviewed and pending detections; the layer decides which are drawn. */
+  detections: DetectionCandidate[];
   /** Bump to re-center on the drone. */
   centerOnDroneRequest: number;
   onAddVertex: (point: LatLon) => void;
@@ -38,7 +42,9 @@ const toLatLon = (l: maplibregl.LngLat): LatLon => ({ latitudeDeg: l.lat, longit
 const toCoord = (p: LatLon): [number, number] => [p.longitudeDeg, p.latitudeDeg];
 
 /** Each concern is its own source + layers so later coverage/trail layers slot in beside them. */
-const SOURCES = ['search-area', 'route', 'draw-preview', 'vertices', 'drone-heading', 'drone'] as const;
+const SOURCES = [
+  'search-area', 'route', 'draw-preview', 'vertices', 'drone-heading', 'drone', 'detections',
+] as const;
 
 function addLayers(map: maplibregl.Map) {
   for (const id of SOURCES) map.addSource(id, { type: 'geojson', data: EMPTY });
@@ -104,6 +110,28 @@ function addLayers(map: maplibregl.Map) {
       'circle-color': ['case', ['get', 'selected'], MAP_COLORS.area, MAP_COLORS.casing],
       'circle-stroke-color': MAP_COLORS.area,
       'circle-stroke-width': 2.5,
+    },
+  });
+  // Detections sit above the plan but below the drone, so the aircraft is never hidden.
+  // A confirmed person is filled; one still awaiting review is hollow.
+  map.addLayer({
+    id: 'detections-casing', type: 'circle', source: 'detections',
+    paint: {
+      'circle-radius': 9,
+      'circle-color': MAP_COLORS.casing,
+      'circle-opacity': 0.9,
+    },
+  });
+  map.addLayer({
+    id: 'detections', type: 'circle', source: 'detections',
+    paint: {
+      'circle-radius': 7,
+      'circle-color': [
+        'case', ['get', 'confirmed'], MAP_COLORS.detectionConfirmed, MAP_COLORS.detectionPending,
+      ],
+      'circle-stroke-color': MAP_COLORS.detectionStroke,
+      // A flat-ground estimate gets a thinner ring, so a rougher fix looks lighter.
+      'circle-stroke-width': ['case', ['get', 'approximate'], 2, 3.5],
     },
   });
   // Heading stick, drawn under the marker so the circle stays the position of record.
@@ -304,7 +332,7 @@ export function MapView(props: MapViewProps) {
     };
   }, []);
 
-  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, centerOnDroneRequest } =
+  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest } =
     props;
 
   // Search-area polygon (closed) or polyline (still drawing).
@@ -378,6 +406,16 @@ export function MapView(props: MapViewProps) {
       map.jumpTo({ center: toCoord(drone) });
     }
   }, [ready, drone]);
+
+  // Detection markers from the candidate collection.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    setData(map, 'detections', {
+      type: 'FeatureCollection',
+      features: detectionFeatures(detections),
+    });
+  }, [ready, detections]);
 
   useEffect(() => {
     const map = mapRef.current;

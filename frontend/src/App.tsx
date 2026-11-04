@@ -51,7 +51,13 @@ export default function App() {
         <h1>SAR operator console</h1>
       </header>
       <main className="dashboard">
-        <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
+        <MapPanel
+          planning={planning}
+          dispatch={dispatch}
+          route={planning.currentRoute}
+          drone={drone}
+          detections={detections.candidates}
+        />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
         <MissionStatusPanel planning={planning} mission={visibleMission} />
         <DroneViewPanel vision={vision} />

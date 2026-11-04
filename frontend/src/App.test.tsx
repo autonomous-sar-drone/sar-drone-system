@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { MapViewProps } from './features/map/MapView';
+import { detectionFeatures } from './features/map/detectionMarkers';
 import type { EventsState } from './features/events/useEvents';
 import type { MissionState, MissionUpdateData } from './types/mission';
 
@@ -40,7 +41,12 @@ const SQUARE = [
 ];
 vi.mock('./features/map/MapView', () => ({
   MapView: (p: MapViewProps) => (
-    <div data-testid="map-stub" data-mode={p.mode} data-route-waypoints={p.route?.waypoints.length ?? 0}>
+    <div
+      data-testid="map-stub"
+      data-mode={p.mode}
+      data-route-waypoints={p.route?.waypoints.length ?? 0}
+      data-detection-pins={detectionFeatures(p.detections).length}
+    >
       <button onClick={() => SQUARE.forEach((pt) => p.onAddVertex(pt))}>stub: place square</button>
       <button onClick={p.onClose}>stub: click first corner</button>
       <button onClick={() => p.onMoveVertex(1, { latitudeDeg: 30.2305, longitudeDeg: -97.7555 })}>
@@ -348,5 +354,61 @@ describe('operator-facing mission copy', () => {
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Continue search' })));
     expect(screen.getByRole('alert')).toHaveTextContent('did not reach takeoff altitude');
     expect(screen.getByRole('alert')).not.toHaveTextContent('Check that it is connected, armed');
+  });
+});
+
+describe('detections on the map', () => {
+  const candidate = (over: Record<string, unknown> = {}) => ({
+    candidateId: 'cand-1',
+    candidateNumber: 1,
+    executionId: 'exec-1',
+    status: 'CONFIRMED',
+    firstObservedAt: '2026-11-04T15:00:00.000Z',
+    capturedAt: '2026-11-04T15:00:00.000Z',
+    publishedAt: '2026-11-04T15:00:00.000Z',
+    reviewedAt: '2026-11-04T15:01:00.000Z',
+    confidence: 0.9,
+    boundingBox: {
+      xPx: 1, yPx: 1, widthPx: 10, heightPx: 10, frameWidthPx: 640, frameHeightPx: 480,
+    },
+    estimatedLocation: {
+      latitudeDeg: 30.2291, longitudeDeg: -97.7555,
+      method: 'TERRAIN_RAYCAST', quality: 'TERRAIN_ADJUSTED',
+    },
+    snapshotUrl: '/api/detections/cand-1/snapshot',
+    ...over,
+  });
+
+  function stubDetections(candidates: unknown[]) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/detections') {
+        return new Response(
+          JSON.stringify({ sessionId: 's1', revision: 1, candidates }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected endpoint: ${url}`);
+    }));
+  }
+
+  it('puts a confirmed detection on the map', async () => {
+    stubDetections([candidate()]);
+    render(<App />);
+    await waitFor(() => expect(map()).toHaveAttribute('data-detection-pins', '1'));
+  });
+
+  it('keeps a camera-position fallback off the map but still lists it', async () => {
+    // The coordinates are the drone's, not the person's, so a pin would mislead.
+    stubDetections([
+      candidate({
+        estimatedLocation: {
+          latitudeDeg: 30.2291, longitudeDeg: -97.7555,
+          method: 'CAMERA_POSITION_FALLBACK', quality: 'CAMERA_POSITION_ONLY',
+        },
+      }),
+    ]);
+    render(<App />);
+    await screen.findByText(/Drone's own position, not the person's/);
+    expect(map()).toHaveAttribute('data-detection-pins', '0');
   });
 });

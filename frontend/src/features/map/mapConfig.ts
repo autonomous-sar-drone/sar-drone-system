@@ -55,4 +55,9 @@ export const MAP_COLORS = {
   drone: '#15202b',
   droneHeading: '#15202b',
   routeStart: '#17784a',
+  // Detections are magenta: far from the orange search area and blue route, so a
+  // possible person never reads as part of the plan.
+  detectionConfirmed: '#b5179e',
+  detectionPending: '#ffffff',
+  detectionStroke: '#b5179e',
 } as const;
