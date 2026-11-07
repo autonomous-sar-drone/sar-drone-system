@@ -6,8 +6,14 @@
  * back as HTTP 409 with the shared { detail: { code, message, details } } envelope,
  * so one parser covers all five commands.
  */
-import type { ActiveTarget, MissionError, MissionExecution, MissionState } from '../types/mission';
-import { MISSION_STATES } from '../types/mission';
+import type {
+  ActiveTarget,
+  InterruptionReason,
+  MissionError,
+  MissionExecution,
+  MissionState,
+} from '../types/mission';
+import { INTERRUPTION_REASONS, MISSION_STATES } from '../types/mission';
 
 export type MissionResult =
   | { ok: true; execution: MissionExecution }
@@ -39,6 +45,13 @@ export function parseExecution(raw: unknown): MissionExecution | null {
     missionState: raw.missionState as MissionState,
     // Serialized with exclude_none, so an absent target means "no current target".
     activeTarget: raw.activeTarget == null ? null : parseActiveTarget(raw.activeTarget),
+    // Same field as on mission_update, so an HTTP response and a socket snapshot
+    // of the same execution never disagree about why it was interrupted.
+    interruptionReason:
+      typeof raw.interruptionReason === 'string' &&
+      INTERRUPTION_REASONS.includes(raw.interruptionReason as InterruptionReason)
+        ? (raw.interruptionReason as InterruptionReason)
+        : null,
   };
 }
 

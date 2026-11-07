@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectionFeatures, isMappable } from './detectionMarkers';
+import { isMappable } from './detectionMarkers';
 import type {
   CandidateStatus,
   DetectionCandidate,
@@ -63,48 +63,5 @@ describe('isMappable', () => {
       method: 'CAMERA_POSITION_FALLBACK',
     });
     expect(isMappable(fallback)).toBe(false);
-  });
-});
-
-describe('detectionFeatures', () => {
-  it('builds a point in lon,lat order for each mappable candidate', () => {
-    const [feature] = detectionFeatures([candidate()]);
-    expect(feature.geometry).toEqual({
-      type: 'Point',
-      coordinates: [-97.7555, 30.2291],
-    });
-  });
-
-  it('flags confirmed and approximate so the layers can style them apart', () => {
-    const [confirmed] = detectionFeatures([
-      candidate({ status: 'CONFIRMED' }, { quality: 'APPROXIMATE', method: 'FLAT_GROUND_APPROXIMATION' }),
-    ]);
-    expect(confirmed.properties).toMatchObject({ confirmed: true, approximate: true });
-
-    const [pending] = detectionFeatures([candidate({ status: 'PENDING' })]);
-    expect(pending.properties).toMatchObject({ confirmed: false, approximate: false });
-  });
-
-  it('carries the candidate number so a pin can be tied back to its row', () => {
-    const [feature] = detectionFeatures([candidate({ candidateNumber: 4 })]);
-    expect(feature.properties?.candidateNumber).toBe(4);
-  });
-
-  it('drops the ones that must not be plotted and keeps the rest', () => {
-    const features = detectionFeatures([
-      candidate({ candidateId: 'keep-1', status: 'CONFIRMED' }),
-      candidate({ candidateId: 'drop-dismissed', status: 'DISMISSED' }),
-      candidate({ candidateId: 'drop-no-location' }, null),
-      candidate({ candidateId: 'drop-fallback' }, {
-        quality: 'CAMERA_POSITION_ONLY',
-        method: 'CAMERA_POSITION_FALLBACK',
-      }),
-      candidate({ candidateId: 'keep-2' }),
-    ]);
-    expect(features.map((f) => f.properties?.candidateId)).toEqual(['keep-1', 'keep-2']);
-  });
-
-  it('returns nothing for an empty list', () => {
-    expect(detectionFeatures([])).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { MapViewProps } from './features/map/MapView';
-import { detectionFeatures } from './features/map/detectionMarkers';
+import { markerModels } from './features/map/detectionMarkerLayer';
 import type { EventsState } from './features/events/useEvents';
 import type { MissionState, MissionUpdateData } from './types/mission';
 
@@ -23,13 +23,17 @@ function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateD
     missionState,
     activeTarget: null,
     runtimeError: null,
+    interruptionReason: null,
     timestamp: '2026-10-26T16:00:00Z',
     ...extra,
   };
 }
 
 beforeEach(() => {
-  events = { reading: null, status: 'connecting', nowMs: 0, mission: null, vision: null, detection: null };
+  events = {
+    reading: null, status: 'connecting', nowMs: 0, mission: null, vision: null,
+    detection: null, reconnectGeneration: 0, socketOpen: true,
+  };
 });
 
 /** WebGL isn't available in jsdom, so the map is replaced by a stub exposing the same callbacks. */
@@ -45,7 +49,8 @@ vi.mock('./features/map/MapView', () => ({
       data-testid="map-stub"
       data-mode={p.mode}
       data-route-waypoints={p.route?.waypoints.length ?? 0}
-      data-detection-pins={detectionFeatures(p.detections).length}
+      data-detection-pins={markerModels(p.detections).length}
+      data-focus={p.focus ? `${p.focus.latitudeDeg},${p.focus.longitudeDeg}` : ''}
     >
       <button onClick={() => SQUARE.forEach((pt) => p.onAddVertex(pt))}>stub: place square</button>
       <button onClick={p.onClose}>stub: click first corner</button>
@@ -397,10 +402,11 @@ describe('detections on the map', () => {
     await waitFor(() => expect(map()).toHaveAttribute('data-detection-pins', '1'));
   });
 
-  it('keeps a camera-position fallback off the map but still lists it', async () => {
+  it('keeps a camera-position fallback off the map but still queues it for review', async () => {
     // The coordinates are the drone's, not the person's, so a pin would mislead.
     stubDetections([
       candidate({
+        status: 'PENDING',
         estimatedLocation: {
           latitudeDeg: 30.2291, longitudeDeg: -97.7555,
           method: 'CAMERA_POSITION_FALLBACK', quality: 'CAMERA_POSITION_ONLY',
@@ -410,5 +416,13 @@ describe('detections on the map', () => {
     render(<App />);
     await screen.findByText(/Drone's own position, not the person's/);
     expect(map()).toHaveAttribute('data-detection-pins', '0');
+  });
+
+  it('centres the map when Show on map is used, without reviewing', async () => {
+    stubDetections([candidate({ status: 'PENDING' })]);
+    render(<App />);
+    const button = await screen.findByRole('button', { name: 'Show on map' });
+    await act(async () => fireEvent.click(button));
+    expect(map()).toHaveAttribute('data-focus', '30.2291,-97.7555');
   });
 });

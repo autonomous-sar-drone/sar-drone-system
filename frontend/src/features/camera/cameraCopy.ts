@@ -27,22 +27,17 @@ export function outageText(seconds: number | null): string | null {
 }
 
 /**
- * What the operator should understand about the feed right now.
- * The camera going down matters most when it has already forced the aircraft home.
+ * What the operator should understand about the FEED right now.
+ *
+ * Only the feed. Anything about the aircraft returning home belongs to
+ * cameraSafetyBanner, which can see mission state; automaticRtlTriggered on its own
+ * is an attempted return, not a confirmed one, so this must not speak for it.
  */
 export function cameraMessage(vision: VisionStatus | null): { title: string; detail: string } {
   if (vision === null) {
     return {
       title: 'Waiting for the backend',
       detail: 'The camera feed appears here once the backend reports its status.',
-    };
-  }
-  if (vision.automaticRtlTriggered) {
-    return {
-      title: 'Camera lost, returning home',
-      detail:
-        'The camera was down long enough that the aircraft was sent home automatically. ' +
-        'The search did not finish.',
     };
   }
   switch (vision.camera.state) {

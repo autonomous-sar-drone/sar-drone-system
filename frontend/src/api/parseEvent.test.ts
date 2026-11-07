@@ -223,3 +223,38 @@ describe('parseEvent: detection_update', () => {
     expect(frame({ sessionId: 's1', candidate }).kind).toBe('invalid');
   });
 });
+
+describe('parseEvent: mission interruptionReason', () => {
+  const base = {
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    missionState: 'RETURNING_HOME',
+    timestamp: '2026-11-07T15:00:00.000Z',
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'mission_update', data: d }));
+
+  it('keeps the backend reason for a return', () => {
+    const result = frame({ ...base, interruptionReason: 'CAMERA_UNAVAILABLE' });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.interruptionReason).toBe('CAMERA_UNAVAILABLE');
+    }
+  });
+
+  it('treats an absent reason as none, since the event uses exclude_none', () => {
+    const result = frame(base);
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.interruptionReason).toBeNull();
+    }
+  });
+
+  it('rejects a reason the frontend does not know rather than dropping it', () => {
+    // Silently discarding it is what hid the reason from the operator before.
+    const result = frame({ ...base, interruptionReason: 'BATTERY_LOW' });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'mission_update: interruptionReason is unrecognized: BATTERY_LOW',
+    });
+  });
+});

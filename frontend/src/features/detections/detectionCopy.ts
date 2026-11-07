@@ -20,6 +20,15 @@ export const QUALITY_COPY: Record<LocationQuality, string> = {
   CAMERA_POSITION_ONLY: "Drone's own position, not the person's",
 };
 
+/**
+ * Whether these coordinates are where the PERSON is, or merely where the drone was.
+ * CAMERA_POSITION_ONLY means projection failed and the backend fell back to the
+ * aircraft's own position, so nothing may present it as a person's location.
+ */
+export function locationIsPersonPosition(location: { quality: LocationQuality }): boolean {
+  return location.quality !== 'CAMERA_POSITION_ONLY';
+}
+
 export function confidenceText(confidence: number): string {
   return `${Math.round(confidence * 100)}% confidence`;
 }

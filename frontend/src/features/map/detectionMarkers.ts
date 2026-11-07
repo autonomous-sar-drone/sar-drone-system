@@ -1,4 +1,3 @@
-import type { Feature } from 'geojson';
 import type { DetectionCandidate } from '../../types/detections';
 
 /**
@@ -21,32 +20,4 @@ export function isMappable(candidate: DetectionCandidate): boolean {
   const location = candidate.estimatedLocation;
   if (location === null) return false;
   return location.quality !== 'CAMERA_POSITION_ONLY';
-}
-
-/**
- * GeoJSON for the detections source. `confirmed` drives the layer filters so a
- * confirmed person reads differently from one still awaiting review.
- */
-export function detectionFeatures(candidates: DetectionCandidate[]): Feature[] {
-  const features: Feature[] = [];
-  for (const candidate of candidates) {
-    if (!isMappable(candidate)) continue;
-    const location = candidate.estimatedLocation;
-    if (location === null) continue; // narrowed by isMappable; kept for the type checker
-    features.push({
-      type: 'Feature',
-      properties: {
-        candidateId: candidate.candidateId,
-        candidateNumber: candidate.candidateNumber,
-        confirmed: candidate.status === 'CONFIRMED',
-        // Flat-ground positions are the rougher of the two we plot.
-        approximate: location.quality === 'APPROXIMATE',
-      },
-      geometry: {
-        type: 'Point',
-        coordinates: [location.longitudeDeg, location.latitudeDeg],
-      },
-    });
-  }
-  return features;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { EventsClient, type SocketState } from '../../api/eventsClient';
 import { config } from '../../core/config';
 import type { MissionUpdateData } from '../../types/mission';
@@ -22,6 +22,15 @@ export interface EventsState {
   vision: VisionStatus | null;
   /** Most recent detection_update. useDetections reconciles these into a list. */
   detection: DetectionUpdateData | null;
+  /**
+   * Increments on every socket RE-establishment, not the first connect. Consumers
+   * holding collections the socket only streams incrementally use this to refetch
+   * their authoritative copy: anything that changed while we were disconnected
+   * produced updates nobody received.
+   */
+  reconnectGeneration: number;
+  /** True only while the socket is open. */
+  socketOpen: boolean;
 }
 
 /** Re-render on an interval so "stale" and "last update" stay current with no new messages. */
@@ -43,11 +52,23 @@ export function useEvents(
   const [vision, setVision] = useState<VisionStatus | null>(null);
   const [detection, setDetection] = useState<DetectionUpdateData | null>(null);
   const [socketState, setSocketState] = useState<SocketState>('connecting');
+  const [reconnectGeneration, setReconnectGeneration] = useState(0);
+  const previousSocketState = useRef<SocketState | null>(null);
+  const hasOpenedOnce = useRef(false);
   const nowMs = useNow(500);
 
   useEffect(() => {
     const client = new EventsClient(url, {
-      onSocketState: setSocketState,
+      onSocketState: (state) => {
+        setSocketState(state);
+        // Count re-establishments only. The first open is already covered by the
+        // initial load, so counting it would mean two GETs on every startup.
+        if (state === 'open' && previousSocketState.current !== 'open') {
+          if (hasOpenedOnce.current) setReconnectGeneration((n) => n + 1);
+          hasOpenedOnce.current = true;
+        }
+        previousSocketState.current = state;
+      },
       onMessage: (message) => {
         if (message.type === 'telemetry_update') {
           const receivedAtMs = Date.now();
@@ -65,11 +86,19 @@ export function useEvents(
           // refetches, so an update lost between renders is still recovered.
           setDetection(message.data);
         } else if (message.type === 'vision_status') {
-          // revision only ever increases, so an out-of-order frame is dropped
-          // rather than moving the panel backwards.
-          setVision((current) =>
-            current !== null && message.data.revision < current.revision ? current : message.data,
-          );
+          // revision is monotonic only WITHIN one sessionId. A backend restart opens
+          // a new session whose revision starts low again, so comparing revisions
+          // across sessions would pin the panel to the dead session's camera health.
+          setVision((current) => {
+            if (
+              current !== null &&
+              current.sessionId === message.data.sessionId &&
+              message.data.revision < current.revision
+            ) {
+              return current;
+            }
+            return message.data;
+          });
         }
       },
     });
@@ -79,5 +108,8 @@ export function useEvents(
 
   // Last known values are deliberately kept when the link goes stale or offline (ST-016).
   const status = deriveLinkStatus(socketState, reading?.receivedAtMs ?? null, nowMs, staleMs);
-  return { reading, status, nowMs, mission, vision, detection };
+  return {
+    reading, status, nowMs, mission, vision, detection,
+    reconnectGeneration, socketOpen: socketState === 'open',
+  };
 }

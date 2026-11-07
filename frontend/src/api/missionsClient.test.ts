@@ -132,3 +132,15 @@ describe('mission commands', () => {
     if (!result.ok) expect(result.error.code).toBe('UNEXPECTED_RESPONSE');
   });
 });
+
+describe('parseExecution interruptionReason', () => {
+  it('carries the reason from an HTTP response too', () => {
+    const parsed = parseExecution({ ...EXECUTION, interruptionReason: 'OPERATOR_STOP' });
+    expect(parsed?.interruptionReason).toBe('OPERATOR_STOP');
+  });
+
+  it('is null when absent or unrecognized', () => {
+    expect(parseExecution(EXECUTION)?.interruptionReason).toBeNull();
+    expect(parseExecution({ ...EXECUTION, interruptionReason: 'NOPE' })?.interruptionReason).toBeNull();
+  });
+});

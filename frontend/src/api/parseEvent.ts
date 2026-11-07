@@ -2,9 +2,11 @@ import { parseCandidate } from './detectionsClient';
 import type { DetectionUpdateData } from '../types/detections';
 import type { EventMessage } from '../types/events';
 import {
+  INTERRUPTION_REASONS,
   MISSION_STATES,
   type ActiveTarget,
   type MissionRuntimeError,
+  type InterruptionReason,
   type MissionState,
   type MissionUpdateData,
 } from '../types/mission';
@@ -115,12 +117,26 @@ function parseMissionData(raw: unknown): MissionUpdateData | string {
     runtimeError = parsed;
   }
 
+  // The backend's own account of why it interrupted or returned. Discarding it
+  // would leave the console guessing at a reason it was already told.
+  let interruptionReason: InterruptionReason | null = null;
+  if (d.interruptionReason !== undefined && d.interruptionReason !== null) {
+    if (
+      typeof d.interruptionReason !== 'string' ||
+      !INTERRUPTION_REASONS.includes(d.interruptionReason as InterruptionReason)
+    ) {
+      return `interruptionReason is unrecognized: ${String(d.interruptionReason)}`;
+    }
+    interruptionReason = d.interruptionReason as InterruptionReason;
+  }
+
   return {
     executionId: d.executionId as string,
     planId: d.planId as string,
     missionState: d.missionState as MissionState,
     activeTarget,
     runtimeError,
+    interruptionReason,
     timestamp: d.timestamp,
   };
 }

@@ -10,7 +10,7 @@ import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import type { EditMode } from '../planning/planningState';
 import { canAppendVertex, canClose, type LatLon } from '../searchArea/geometry';
-import { detectionFeatures } from './detectionMarkers';
+import { DetectionMarkerLayer } from './detectionMarkerLayer';
 import { headingSegment, type DronePose } from './headingIndicator';
 import { INITIAL_ZOOM, MAP_COLORS, SNAP_PX, initialCenter, mapStyle } from './mapConfig';
 
@@ -24,14 +24,25 @@ export interface MapViewProps {
   /** Read-only. Fed from planning state's currentRoute, never edited here. */
   route: Route | null;
   drone: DronePose | null;
-  /** Reviewed and pending detections; the layer decides which are drawn. */
+  /** Reviewed and pending detections; the marker layer decides which are drawn. */
   detections: DetectionCandidate[];
+  /** Selecting a marker moves the review queue; it never records a decision. */
+  onSelectDetection?: (candidateId: string) => void;
   /** Bump to re-center on the drone. */
   centerOnDroneRequest: number;
+  /** Where "Show on map" asked to centre. nonce changes even for the same point. */
+  focus: MapFocus | null;
   onAddVertex: (point: LatLon) => void;
   onClose: () => void;
   onMoveVertex: (index: number, point: LatLon) => void;
   onSelectVertex: (index: number | null) => void;
+}
+
+/** A request to centre the map, carried as data so the same point can be re-requested. */
+export interface MapFocus {
+  latitudeDeg: number;
+  longitudeDeg: number;
+  nonce: number;
 }
 
 type FC = FeatureCollection;
@@ -110,28 +121,6 @@ function addLayers(map: maplibregl.Map) {
       'circle-color': ['case', ['get', 'selected'], MAP_COLORS.area, MAP_COLORS.casing],
       'circle-stroke-color': MAP_COLORS.area,
       'circle-stroke-width': 2.5,
-    },
-  });
-  // Detections sit above the plan but below the drone, so the aircraft is never hidden.
-  // A confirmed person is filled; one still awaiting review is hollow.
-  map.addLayer({
-    id: 'detections-casing', type: 'circle', source: 'detections',
-    paint: {
-      'circle-radius': 9,
-      'circle-color': MAP_COLORS.casing,
-      'circle-opacity': 0.9,
-    },
-  });
-  map.addLayer({
-    id: 'detections', type: 'circle', source: 'detections',
-    paint: {
-      'circle-radius': 7,
-      'circle-color': [
-        'case', ['get', 'confirmed'], MAP_COLORS.detectionConfirmed, MAP_COLORS.detectionPending,
-      ],
-      'circle-stroke-color': MAP_COLORS.detectionStroke,
-      // A flat-ground estimate gets a thinner ring, so a rougher fix looks lighter.
-      'circle-stroke-width': ['case', ['get', 'approximate'], 2, 3.5],
     },
   });
   // Heading stick, drawn under the marker so the circle stays the position of record.
@@ -332,7 +321,7 @@ export function MapView(props: MapViewProps) {
     };
   }, []);
 
-  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest } =
+  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest, focus } =
     props;
 
   // Search-area polygon (closed) or polyline (still drawing).
@@ -407,15 +396,35 @@ export function MapView(props: MapViewProps) {
     }
   }, [ready, drone]);
 
-  // Detection markers from the candidate collection.
+  // Detection markers are DOM overlays, not a layer: they carry a visible number and
+  // need a real hover target, neither of which a glyph-less symbol layer can give.
+  const markerLayer = useRef<DetectionMarkerLayer | null>(null);
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    setData(map, 'detections', {
-      type: 'FeatureCollection',
-      features: detectionFeatures(detections),
+    const layer = new DetectionMarkerLayer(map, {
+      onSelect: (candidateId) => propsRef.current.onSelectDetection?.(candidateId),
     });
-  }, [ready, detections]);
+    markerLayer.current = layer;
+    layer.sync(propsRef.current.detections);
+    return () => {
+      layer.destroy();
+      markerLayer.current = null;
+    };
+  }, [ready]);
+
+  useEffect(() => {
+    markerLayer.current?.sync(detections);
+  }, [detections]);
+
+  // "Show on map": centre on a candidate without changing anything about it.
+  const focusNonce = focus?.nonce ?? 0;
+  useEffect(() => {
+    const map = mapRef.current;
+    const target = propsRef.current.focus;
+    if (!map || focusNonce === 0 || !target) return;
+    map.easeTo({ center: [target.longitudeDeg, target.latitudeDeg], zoom: 18, duration: 400 });
+  }, [focusNonce]);
 
   useEffect(() => {
     const map = mapRef.current;

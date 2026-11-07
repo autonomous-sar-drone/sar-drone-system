@@ -99,7 +99,7 @@ describe('useDetections', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('puts candidates needing review first, newest within each group', async () => {
+  it('keeps every candidate authoritative but queues only the pending ones', async () => {
     fetchMock.mockResolvedValueOnce(
       collection(1, [
         candidate({ candidateId: 'a', candidateNumber: 1, status: 'PENDING' }),
@@ -111,7 +111,92 @@ describe('useDetections', () => {
       initialProps: { u: null as DetectionUpdateData | null },
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.candidates.map((c) => c.candidateId)).toEqual(['c', 'a', 'b']);
+    // The confirmed record stays in the collection for the map and for reconnect
+    // reconciliation, but it is not something the operator still has to act on.
+    expect(result.current.candidates.map((c) => c.candidateId)).toEqual(['a', 'b', 'c']);
+    expect(result.current.pending.map((c) => c.candidateId)).toEqual(['a', 'c']);
+  });
+
+  it('refetches the authoritative collection on every socket reconnect', async () => {
+    const { result, rerender } = renderHook(
+      ({ u, g }) => useDetections(u, { reconnectGeneration: g }),
+      { initialProps: { u: null as DetectionUpdateData | null, g: 0 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // A candidate reviewed while disconnected produces no update we ever see,
+    // so only a refetch can tell us the queue moved on.
+    rerender({ u: null, g: 1 });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    // A steady connection must not keep re-requesting.
+    rerender({ u: null, g: 1 });
+    await act(async () => {});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports staleness while the socket is down', async () => {
+    const { result, rerender } = renderHook(
+      ({ u, c }) => useDetections(u, { connected: c }),
+      { initialProps: { u: null as DetectionUpdateData | null, c: true } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.stale).toBe(false);
+    rerender({ u: null, c: false });
+    expect(result.current.stale).toBe(true);
+  });
+
+  it('advances selection to the next card after a review', async () => {
+    fetchMock.mockResolvedValueOnce(
+      collection(1, [
+        candidate({ candidateId: 'a', candidateNumber: 1 }),
+        candidate({ candidateId: 'b', candidateNumber: 2 }),
+        candidate({ candidateId: 'c', candidateNumber: 3 }),
+      ]),
+    );
+    const { result } = renderHook(({ u }) => useDetections(u), {
+      initialProps: { u: null as DetectionUpdateData | null },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.selectedId).toBe('a');
+
+    act(() => result.current.select('b'));
+    expect(result.current.selectedId).toBe('b');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          sessionId: 's1',
+          revision: 2,
+          candidate: { ...candidate({ candidateId: 'b', candidateNumber: 2 }), status: 'CONFIRMED' },
+        }),
+        { status: 200 },
+      ),
+    );
+    await act(async () => {
+      await result.current.review('b', 'CONFIRM');
+    });
+    expect(result.current.pending.map((c) => c.candidateId)).toEqual(['a', 'c']);
+    expect(result.current.selectedId).toBe('c');
+  });
+
+  it('does not let a new arrival steal the selected card', async () => {
+    fetchMock.mockResolvedValueOnce(
+      collection(1, [
+        candidate({ candidateId: 'a', candidateNumber: 1 }),
+        candidate({ candidateId: 'b', candidateNumber: 2 }),
+      ]),
+    );
+    const { result, rerender } = renderHook(({ u }) => useDetections(u), {
+      initialProps: { u: null as DetectionUpdateData | null },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.select('b'));
+
+    rerender({ u: update(2, candidate({ candidateId: 'd', candidateNumber: 4 })) });
+    await waitFor(() => expect(result.current.pending).toHaveLength(3));
+    expect(result.current.selectedId).toBe('b');
   });
 
   it('applies the review response even if no socket update follows', async () => {
