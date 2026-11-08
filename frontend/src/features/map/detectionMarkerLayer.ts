@@ -80,42 +80,89 @@ export function createMarkerElement(model: MarkerModel): HTMLElement {
   return el;
 }
 
+/** Reapply the actual SVG and label when a candidate is confirmed in place. */
+export function updateMarkerElement(el: HTMLElement, model: MarkerModel): void {
+  el.className = `detect-marker detect-marker--${model.confirmed ? 'confirmed' : 'pending'}`;
+  el.setAttribute(
+    'aria-label',
+    `${model.confirmed ? 'Confirmed person' : 'Possible person'} ${model.candidateNumber}`,
+  );
+  const shape = el.querySelector('.detect-marker__shape');
+  if (shape) shape.innerHTML = model.confirmed ? CONFIRMED_SVG : PENDING_SVG;
+  const number = el.querySelector('.detect-marker__number');
+  if (number) number.textContent = String(model.candidateNumber);
+}
+
 /**
  * Read-only preview. No Confirm or Dismiss here: reviewing from a hover popup is
  * too easy to do by accident, and the review queue is the one place a decision is
  * recorded.
  */
+/** Read-only, compact preview. Coordinates refer to the historical person estimate. */
 export function createPopupElement(candidate: DetectionCandidate, nowMs: number): HTMLElement {
   const root = document.createElement('div');
   root.className = 'detect-popup';
 
   const image = document.createElement('img');
   image.className = 'detect-popup__thumb';
-  // The backend's own path, used as given. Nothing is constructed from parts here.
   image.src = candidate.snapshotUrl;
-  image.alt = `Snapshot of possible person ${candidate.candidateNumber}`;
+  image.alt = `Annotated snapshot of possible person ${candidate.candidateNumber}`;
   image.loading = 'lazy';
 
+  const details = document.createElement('div');
+  details.className = 'detect-popup__details';
+
+  const heading = document.createElement('div');
+  heading.className = 'detect-popup__heading';
   const title = document.createElement('p');
   title.className = 'detect-popup__title';
-  title.textContent = `Possible person ${candidate.candidateNumber}`;
+  title.textContent = `Possible person #${candidate.candidateNumber}`;
+  heading.appendChild(title);
+
+  if (candidate.status === 'CONFIRMED') {
+    const state = document.createElement('span');
+    state.className = 'detect-popup__state';
+    state.textContent = 'Confirmed';
+    heading.appendChild(state);
+  }
 
   const meta = document.createElement('p');
   meta.className = 'detect-popup__meta';
-  meta.textContent = `${confidenceText(candidate.confidence)} · ${relativeTime(candidate.capturedAt, nowMs)}`;
+  const confidence = document.createElement('span');
+  confidence.textContent = confidenceText(candidate.confidence);
+  const captured = document.createElement('time');
+  captured.dateTime = candidate.capturedAt;
+  captured.title = `${candidate.capturedAt} · ${relativeTime(candidate.capturedAt, nowMs)}`;
+  const capturedMs = Date.parse(candidate.capturedAt);
+  captured.textContent = Number.isNaN(capturedMs)
+    ? 'Time unavailable'
+    : new Intl.DateTimeFormat(undefined, {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      }).format(new Date(capturedMs));
+  meta.append(confidence, captured);
 
+  const location = candidate.estimatedLocation;
+  const coordinates = document.createElement('p');
+  coordinates.className = 'detect-popup__coordinates';
   const quality = document.createElement('p');
   quality.className = 'detect-popup__quality';
-  quality.textContent = candidate.estimatedLocation
-    ? QUALITY_COPY[candidate.estimatedLocation.quality]
-    : 'No ground position could be worked out.';
+  if (location === null) {
+    coordinates.textContent = 'Location unavailable';
+    quality.textContent = 'No ground position could be worked out.';
+  } else {
+    // Human-readable hemispheres; the backend's coordinates are authoritative.
+    const lat = `${Math.abs(location.latitudeDeg).toFixed(5)}° ${location.latitudeDeg >= 0 ? 'N' : 'S'}`;
+    const lon = `${Math.abs(location.longitudeDeg).toFixed(5)}° ${location.longitudeDeg >= 0 ? 'E' : 'W'}`;
+    coordinates.textContent = `${lat}, ${lon}`;
+    quality.textContent = location.quality === 'APPROXIMATE'
+      ? 'Estimated (flat ground) · Last seen here'
+      : location.quality === 'TERRAIN_ADJUSTED'
+        ? 'Estimated (terrain-adjusted) · Last seen here'
+        : QUALITY_COPY[location.quality]; // Never call a drone-position fallback a person estimate.
+  }
 
-  // Where it was seen, which is not where the drone is now.
-  const historical = document.createElement('p');
-  historical.className = 'detect-popup__historical';
-  historical.textContent = 'Last seen here, not the drone’s current position.';
-
-  root.append(image, title, meta, quality, historical);
+  details.append(heading, meta, coordinates, quality);
+  root.append(image, details);
   return root;
 }
 
@@ -131,6 +178,7 @@ interface Entry {
   popup: maplibregl.Popup;
   element: HTMLElement;
   model: MarkerModel;
+  candidate: DetectionCandidate;
   listeners: Array<[string, EventListener]>;
 }
 
@@ -172,13 +220,10 @@ export class DetectionMarkerLayer {
       // Identity and position must not move across a review, so only the state
       // that changes the look is reapplied.
       if (existing.model.confirmed !== model.confirmed) {
-        existing.element.className = `detect-marker detect-marker--${model.confirmed ? 'confirmed' : 'pending'}`;
-        existing.element.setAttribute(
-          'aria-label',
-          `${model.confirmed ? 'Confirmed person' : 'Possible person'} ${model.candidateNumber}`,
-        );
+        updateMarkerElement(existing.element, model);
       }
       existing.model = model;
+      existing.candidate = candidate;
       existing.popup.setDOMContent(this.popupFor(candidate));
     }
   }
@@ -194,13 +239,16 @@ export class DetectionMarkerLayer {
       closeButton: false,
       closeOnClick: false,
       offset: 14,
+      maxWidth: '520px',
+      className: 'sar-detection-popup',
     });
     const marker = new maplibregl.Marker({ element }).setLngLat(model.lngLat).addTo(this.map);
 
     const listeners: Array<[string, EventListener]> = [];
+    const entry: Entry = { marker, popup, element, model, candidate, listeners };
     const open = () => {
-      popup.setDOMContent(this.popupFor(candidate));
-      popup.setLngLat(model.lngLat).addTo(this.map);
+      popup.setDOMContent(this.popupFor(entry.candidate));
+      popup.setLngLat(entry.model.lngLat).addTo(this.map);
     };
     const close = () => popup.remove();
     const select = (event: Event) => {
@@ -208,7 +256,7 @@ export class DetectionMarkerLayer {
       // vertex under the marker while the operator is still drawing.
       event.stopPropagation();
       event.preventDefault();
-      this.options.onSelect?.(model.candidateId);
+      this.options.onSelect?.(entry.model.candidateId);
     };
 
     for (const [type, handler] of [
@@ -222,7 +270,7 @@ export class DetectionMarkerLayer {
       listeners.push([type, handler]);
     }
 
-    return { marker, popup, element, model, listeners };
+    return entry;
   }
 
   private removeEntry(entry: Entry): void {

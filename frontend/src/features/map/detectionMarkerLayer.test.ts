@@ -3,6 +3,7 @@ import {
   createMarkerElement,
   createPopupElement,
   markerModels,
+  updateMarkerElement,
 } from './detectionMarkerLayer';
 import type {
   CandidateStatus,
@@ -95,14 +96,30 @@ describe('createMarkerElement', () => {
   });
 });
 
+describe('updateMarkerElement', () => {
+  it('replaces the triangle SVG with the confirmed person icon in place', () => {
+    const [pending] = markerModels([candidate(1, 'PENDING')]);
+    const [confirmed] = markerModels([candidate(1, 'CONFIRMED')]);
+    const el = createMarkerElement(pending);
+    expect(el.querySelector('.detect-marker__shape circle')).toBeNull();
+    updateMarkerElement(el, confirmed);
+    expect(el.className).toContain('detect-marker--confirmed');
+    expect(el.querySelector('.detect-marker__shape circle')).not.toBeNull();
+    expect(el.getAttribute('aria-label')).toBe('Confirmed person 1');
+    expect(el.querySelector('.detect-marker__number')?.textContent).toBe('1');
+  });
+});
+
 describe('createPopupElement', () => {
   it('previews the candidate without offering a decision', () => {
     const el = createPopupElement(candidate(3), NOW);
     expect(el.querySelector('img')?.getAttribute('src')).toBe('/api/detections/cand-3/snapshot');
-    expect(el.textContent).toContain('Possible person 3');
+    expect(el.textContent).toContain('Possible person #3');
     expect(el.textContent).toContain('82% confidence');
-    expect(el.textContent).toContain('2m ago');
-    expect(el.textContent).toContain('Adjusted for terrain');
+    expect(el.querySelector('time')?.getAttribute('datetime')).toBe('2026-11-07T15:00:00.000Z');
+    expect(el.querySelector('time')?.getAttribute('title')).toContain('2m ago');
+    expect(el.textContent).toContain('30.22910° N, 97.75550° W');
+    expect(el.textContent).toContain('Estimated (terrain-adjusted)');
     // Reviewing from a hover popup is too easy to do by accident.
     expect(el.querySelector('button')).toBeNull();
   });
@@ -110,13 +127,31 @@ describe('createPopupElement', () => {
   it('labels the point as historical, not the drone now', () => {
     const el = createPopupElement(candidate(1), NOW);
     expect(el.textContent).toMatch(/Last seen here/);
+    expect(el.textContent).not.toMatch(/not the drone’s current position/i);
   });
 
+
+  it('keeps the snapshot nearly full width with details in a separate region', () => {
+    const el = createPopupElement(candidate(1, 'CONFIRMED'), NOW);
+    expect(el.children[0]?.className).toBe('detect-popup__thumb');
+    expect(el.children[1]?.className).toBe('detect-popup__details');
+    expect(el.textContent).toContain('Confirmed');
+  });
+
+  it('formats southern and eastern coordinate hemispheres correctly', () => {
+    const other = candidate(8);
+    other.estimatedLocation = {
+      latitudeDeg: -33.8651, longitudeDeg: 151.2099,
+      method: 'TERRAIN_RAYCAST', quality: 'TERRAIN_ADJUSTED',
+    };
+    const el = createPopupElement(other, NOW);
+    expect(el.textContent).toContain('33.86510° S, 151.20990° E');
+  });
   it('builds content as text, so candidate data can never become markup', () => {
     const hostile = { ...candidate(1), candidateNumber: 5 };
     const el = createPopupElement(hostile, NOW);
     const title = el.querySelector('.detect-popup__title');
-    expect(title?.textContent).toBe('Possible person 5');
+    expect(title?.textContent).toBe('Possible person #5');
     expect(title?.children).toHaveLength(0);
   });
 

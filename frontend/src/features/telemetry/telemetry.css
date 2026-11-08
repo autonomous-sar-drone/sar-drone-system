@@ -15,7 +15,7 @@
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 0.875rem;
-  padding: 0.75rem 1rem;
+  padding: 0.625rem 0.75rem;
   background: var(--neutral-tint);
   color: var(--ink);
 }
@@ -87,7 +87,7 @@
 }
 
 /* Six readouts sized to the panel, not the window: 1, 2 or 3 columns, never an empty cell. */
-@container (min-width: 22rem) {
+@container (min-width: 19rem) {
   .readouts { grid-template-columns: repeat(2, 1fr); }
 }
 @container (min-width: 44rem) {
@@ -100,7 +100,7 @@
 
 .readout {
   background: var(--panel);
-  padding: 0.75rem 1rem;
+  padding: 0.625rem 0.75rem;
 }
 
 .readout__label {
@@ -109,7 +109,7 @@
 }
 
 .readout__value {
-  font-size: clamp(1.0625rem, 5cqi, 1.5rem);
+  font-size: clamp(1rem, 4.5cqi, 1.375rem);
   font-weight: 620;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.015em;
