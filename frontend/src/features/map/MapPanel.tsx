@@ -1,15 +1,19 @@
 import { useState, type Dispatch } from 'react';
 import { Panel } from '../../components/Panel';
+import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import { editMode, localIssue, type PlanningAction, type PlanningState } from '../planning/planningState';
 import type { DronePose } from './headingIndicator';
-import { MapView } from './MapView';
+import { MapView, type MapFocus } from './MapView';
 
 interface Props {
   planning: PlanningState;
   dispatch: Dispatch<PlanningAction>;
   route: Route | null;
   drone: DronePose | null;
+  detections: DetectionCandidate[];
+  focus: MapFocus | null;
+  onSelectDetection: (candidateId: string) => void;
 }
 
 function hint(planning: PlanningState): string | null {
@@ -27,7 +31,9 @@ function hint(planning: PlanningState): string | null {
   return null;
 }
 
-export function MapPanel({ planning, dispatch, route, drone }: Props) {
+export function MapPanel({
+  planning, dispatch, route, drone, detections, focus, onSelectDetection,
+}: Props) {
   const [centerRequest, setCenterRequest] = useState(0);
   const mode = editMode(planning);
   const message = hint(planning);
@@ -56,7 +62,10 @@ export function MapPanel({ planning, dispatch, route, drone }: Props) {
           shapeInvalid={localIssue(planning) === 'SELF_INTERSECTION'}
           route={route}
           drone={drone}
+          detections={detections}
           centerOnDroneRequest={centerRequest}
+          focus={focus}
+          onSelectDetection={onSelectDetection}
           onAddVertex={(point) => dispatch({ type: 'ADD_VERTEX', point })}
           onClose={() => dispatch({ type: 'CLOSE_POLYGON' })}
           onMoveVertex={(index, point) => dispatch({ type: 'MOVE_VERTEX', index, point })}

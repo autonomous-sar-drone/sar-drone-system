@@ -1,12 +1,23 @@
+import { parseCandidate } from './detectionsClient';
+import type { DetectionUpdateData } from '../types/detections';
 import type { EventMessage } from '../types/events';
 import {
+  INTERRUPTION_REASONS,
   MISSION_STATES,
   type ActiveTarget,
   type MissionRuntimeError,
+  type InterruptionReason,
   type MissionState,
   type MissionUpdateData,
 } from '../types/mission';
 import type { TelemetryData } from '../types/telemetry';
+import {
+  HEALTH_STATES,
+  type CameraHealth,
+  type DetectorHealth,
+  type HealthState,
+  type VisionStatus,
+} from '../types/vision';
 
 export type ParseResult =
   | { kind: 'ok'; message: EventMessage }
@@ -106,14 +117,95 @@ function parseMissionData(raw: unknown): MissionUpdateData | string {
     runtimeError = parsed;
   }
 
+  // The backend's own account of why it interrupted or returned. Discarding it
+  // would leave the console guessing at a reason it was already told.
+  let interruptionReason: InterruptionReason | null = null;
+  if (d.interruptionReason !== undefined && d.interruptionReason !== null) {
+    if (
+      typeof d.interruptionReason !== 'string' ||
+      !INTERRUPTION_REASONS.includes(d.interruptionReason as InterruptionReason)
+    ) {
+      return `interruptionReason is unrecognized: ${String(d.interruptionReason)}`;
+    }
+    interruptionReason = d.interruptionReason as InterruptionReason;
+  }
+
   return {
     executionId: d.executionId as string,
     planId: d.planId as string,
     missionState: d.missionState as MissionState,
     activeTarget,
     runtimeError,
+    interruptionReason,
     timestamp: d.timestamp,
   };
+}
+
+function parseHealth(raw: unknown, name: 'camera' | 'detector', timeField: string):
+  | { state: HealthState; at: string | null }
+  | string {
+  if (!isObj(raw)) return `${name} is missing or not an object`;
+  if (typeof raw.state !== 'string' || !HEALTH_STATES.includes(raw.state as HealthState)) {
+    return `${name}.state is missing or unrecognized: ${String(raw.state)}`;
+  }
+
+  // Null before the first frame or inference. Absent is tolerated too, in case the
+  // backend ever switches this event to exclude_none like the other two.
+  const rawAt = raw[timeField];
+  let at: string | null = null;
+  if (rawAt !== undefined && rawAt !== null) {
+    if (typeof rawAt !== 'string' || Number.isNaN(Date.parse(rawAt))) {
+      return `${name}.${timeField} must be ISO-8601 or null`;
+    }
+    at = rawAt;
+  }
+
+  return { state: raw.state as HealthState, at };
+}
+
+function parseVisionStatus(raw: unknown): VisionStatus | string {
+  if (!isObj(raw)) return 'data is not an object';
+  const d = raw;
+
+  if (typeof d.sessionId !== 'string') return 'sessionId is missing or not a string';
+  if (!isFiniteNumber(d.revision) || d.revision < 0) return 'revision is missing or negative';
+  if (typeof d.timestamp !== 'string' || Number.isNaN(Date.parse(d.timestamp))) {
+    return 'timestamp is missing or not ISO-8601';
+  }
+  if (typeof d.automaticRtlTriggered !== 'boolean') {
+    return 'automaticRtlTriggered is missing or not a boolean';
+  }
+
+  const camera = parseHealth(d.camera, 'camera', 'lastFrameAt');
+  if (typeof camera === 'string') return camera;
+  const detector = parseHealth(d.detector, 'detector', 'lastInferenceAt');
+  if (typeof detector === 'string') return detector;
+
+  // Null while the camera is healthy; a number only during an outage.
+  let cameraOutageSeconds: number | null = null;
+  if (d.cameraOutageSeconds !== undefined && d.cameraOutageSeconds !== null) {
+    if (!isFiniteNumber(d.cameraOutageSeconds)) return 'cameraOutageSeconds must be a number or null';
+    cameraOutageSeconds = d.cameraOutageSeconds;
+  }
+
+  return {
+    sessionId: d.sessionId,
+    revision: d.revision,
+    timestamp: d.timestamp,
+    camera: { state: camera.state, lastFrameAt: camera.at } satisfies CameraHealth,
+    detector: { state: detector.state, lastInferenceAt: detector.at } satisfies DetectorHealth,
+    cameraOutageSeconds,
+    automaticRtlTriggered: d.automaticRtlTriggered,
+  };
+}
+
+function parseDetectionData(raw: unknown): DetectionUpdateData | string {
+  if (!isObj(raw)) return 'data is not an object';
+  if (typeof raw.sessionId !== 'string') return 'sessionId is missing or not a string';
+  if (!isFiniteNumber(raw.revision) || raw.revision < 0) return 'revision is missing or negative';
+  const candidate = parseCandidate(raw.candidate);
+  if (candidate === null) return 'candidate is missing or does not match the contract';
+  return { sessionId: raw.sessionId, revision: raw.revision, candidate };
 }
 
 /** Parse one raw WebSocket frame. Never throws. */
@@ -142,6 +234,16 @@ export function parseEvent(raw: string): ParseResult {
       const data = parseMissionData(msg.data);
       if (typeof data === 'string') return { kind: 'invalid', reason: `mission_update: ${data}` };
       return { kind: 'ok', message: { type: 'mission_update', data } };
+    }
+    case 'vision_status': {
+      const data = parseVisionStatus(msg.data);
+      if (typeof data === 'string') return { kind: 'invalid', reason: `vision_status: ${data}` };
+      return { kind: 'ok', message: { type: 'vision_status', data } };
+    }
+    case 'detection_update': {
+      const data = parseDetectionData(msg.data);
+      if (typeof data === 'string') return { kind: 'invalid', reason: `detection_update: ${data}` };
+      return { kind: 'ok', message: { type: 'detection_update', data } };
     }
     default:
       return { kind: 'unknown_type', type: msg.type };

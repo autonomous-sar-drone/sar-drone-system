@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { MapViewProps } from './features/map/MapView';
+import { markerModels } from './features/map/detectionMarkerLayer';
 import type { EventsState } from './features/events/useEvents';
 import type { MissionState, MissionUpdateData } from './types/mission';
 
@@ -22,13 +23,17 @@ function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateD
     missionState,
     activeTarget: null,
     runtimeError: null,
+    interruptionReason: null,
     timestamp: '2026-10-26T16:00:00Z',
     ...extra,
   };
 }
 
 beforeEach(() => {
-  events = { reading: null, status: 'connecting', nowMs: 0, mission: null };
+  events = {
+    reading: null, status: 'connecting', nowMs: 0, mission: null, vision: null,
+    detection: null, reconnectGeneration: 0, socketOpen: true,
+  };
 });
 
 /** WebGL isn't available in jsdom, so the map is replaced by a stub exposing the same callbacks. */
@@ -40,7 +45,13 @@ const SQUARE = [
 ];
 vi.mock('./features/map/MapView', () => ({
   MapView: (p: MapViewProps) => (
-    <div data-testid="map-stub" data-mode={p.mode} data-route-waypoints={p.route?.waypoints.length ?? 0}>
+    <div
+      data-testid="map-stub"
+      data-mode={p.mode}
+      data-route-waypoints={p.route?.waypoints.length ?? 0}
+      data-detection-pins={markerModels(p.detections).length}
+      data-focus={p.focus ? `${p.focus.latitudeDeg},${p.focus.longitudeDeg}` : ''}
+    >
       <button onClick={() => SQUARE.forEach((pt) => p.onAddVertex(pt))}>stub: place square</button>
       <button onClick={p.onClose}>stub: click first corner</button>
       <button onClick={() => p.onMoveVertex(1, { latitudeDeg: 30.2305, longitudeDeg: -97.7555 })}>
@@ -62,10 +73,29 @@ const plan = {
   planningUsed: { searchAltitudeM: 25, laneSpacingM: 20 },
 };
 
+const EMPTY_DETECTIONS = { sessionId: 'test-session', revision: 0, candidates: [] };
+
+/**
+ * App loads the detection collection on mount, so every stub has to answer that
+ * endpoint. Only the other endpoints get the status and body under test.
+ */
 function mockFetch(status: number, body: unknown) {
-  const fn = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+  const fn = vi.fn(async (url: string) => {
+    if (url === '/api/detections') {
+      return new Response(JSON.stringify(EMPTY_DETECTIONS), { status: 200 });
+    }
+    return new Response(JSON.stringify(body), { status });
+  });
   vi.stubGlobal('fetch', fn);
   return fn;
+}
+
+/** Find a call by endpoint, so an unrelated request cannot shift an index. */
+function callTo(fn: { mock: { calls: unknown[] } }, path: string): [string, RequestInit] {
+  const calls = fn.mock.calls as unknown as [string, RequestInit][];
+  const found = calls.find(([url]) => url === path);
+  if (!found) throw new Error(`No request was made to ${path}`);
+  return found;
 }
 
 const controls = () => within(screen.getByRole('toolbar', { name: 'Mission controls' }));
@@ -110,7 +140,7 @@ describe('search area and route preview flow', () => {
 
     await act(async () => fireEvent.click(generate));
 
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const body = JSON.parse(callTo(fetchMock, '/api/routes/preview')[1].body as string);
     expect(body).toEqual({ searchArea: { vertices: SQUARE } });
     expect(map()).toHaveAttribute('data-route-waypoints', '2');
     expect(map()).toHaveAttribute('data-mode', 'locked');
@@ -184,8 +214,7 @@ describe('live mission controls', () => {
     render(<App />);
 
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Pause' })));
-    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('/api/missions/exec-1/pause');
+    expect(callTo(fetchMock, '/api/missions/exec-1/pause')).toBeTruthy();
   });
 
   it('shows a rejected command without moving the state the backend owns', async () => {
@@ -244,6 +273,9 @@ describe('new search after completed execution', () => {
           executionId: 'exec-2', planId: 'plan-2', missionState: 'RUNNING', activeTarget: null,
         }), { status: 200 });
       }
+      if (url === '/api/detections') {
+        return new Response(JSON.stringify(EMPTY_DETECTIONS), { status: 200 });
+      }
       throw new Error(`Unexpected endpoint: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -265,8 +297,9 @@ describe('new search after completed execution', () => {
 
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Commence mission' })));
     const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
-    expect(calls.map(([url]) => url)).toEqual(['/api/routes/preview', '/api/missions/commence']);
-    expect(JSON.parse(calls[1][1].body as string)).toEqual({ planId: 'plan-2' });
+    const missionCalls = calls.map(([url]) => url).filter((url) => url !== '/api/detections');
+    expect(missionCalls).toEqual(['/api/routes/preview', '/api/missions/commence']);
+    expect(JSON.parse(callTo(fetchMock, '/api/missions/commence')[1].body as string)).toEqual({ planId: 'plan-2' });
     // The HTTP response isn't authoritative for UI mission state; only WS updates are.
     expect(screen.getByText('Plan ready')).toBeInTheDocument();
   });
@@ -326,5 +359,70 @@ describe('operator-facing mission copy', () => {
     await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Continue search' })));
     expect(screen.getByRole('alert')).toHaveTextContent('did not reach takeoff altitude');
     expect(screen.getByRole('alert')).not.toHaveTextContent('Check that it is connected, armed');
+  });
+});
+
+describe('detections on the map', () => {
+  const candidate = (over: Record<string, unknown> = {}) => ({
+    candidateId: 'cand-1',
+    candidateNumber: 1,
+    executionId: 'exec-1',
+    status: 'CONFIRMED',
+    firstObservedAt: '2026-11-04T15:00:00.000Z',
+    capturedAt: '2026-11-04T15:00:00.000Z',
+    publishedAt: '2026-11-04T15:00:00.000Z',
+    reviewedAt: '2026-11-04T15:01:00.000Z',
+    confidence: 0.9,
+    boundingBox: {
+      xPx: 1, yPx: 1, widthPx: 10, heightPx: 10, frameWidthPx: 640, frameHeightPx: 480,
+    },
+    estimatedLocation: {
+      latitudeDeg: 30.2291, longitudeDeg: -97.7555,
+      method: 'TERRAIN_RAYCAST', quality: 'TERRAIN_ADJUSTED',
+    },
+    snapshotUrl: '/api/detections/cand-1/snapshot',
+    ...over,
+  });
+
+  function stubDetections(candidates: unknown[]) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/detections') {
+        return new Response(
+          JSON.stringify({ sessionId: 's1', revision: 1, candidates }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected endpoint: ${url}`);
+    }));
+  }
+
+  it('puts a confirmed detection on the map', async () => {
+    stubDetections([candidate()]);
+    render(<App />);
+    await waitFor(() => expect(map()).toHaveAttribute('data-detection-pins', '1'));
+  });
+
+  it('keeps a camera-position fallback off the map but still queues it for review', async () => {
+    // The coordinates are the drone's, not the person's, so a pin would mislead.
+    stubDetections([
+      candidate({
+        status: 'PENDING',
+        estimatedLocation: {
+          latitudeDeg: 30.2291, longitudeDeg: -97.7555,
+          method: 'CAMERA_POSITION_FALLBACK', quality: 'CAMERA_POSITION_ONLY',
+        },
+      }),
+    ]);
+    render(<App />);
+    await screen.findByText(/Drone's own position, not the person's/);
+    expect(map()).toHaveAttribute('data-detection-pins', '0');
+  });
+
+  it('centres the map when Show on map is used, without reviewing', async () => {
+    stubDetections([candidate({ status: 'PENDING' })]);
+    render(<App />);
+    const button = await screen.findByRole('button', { name: 'Show on map' });
+    await act(async () => fireEvent.click(button));
+    expect(map()).toHaveAttribute('data-focus', '30.2291,-97.7555');
   });
 });

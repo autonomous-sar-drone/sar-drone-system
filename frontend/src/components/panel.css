@@ -15,7 +15,28 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.625rem 1rem;
-  border-bottom: 1px solid var(--rule);
+  /* Deep olive bars make the four work panels distinct from the parchment canvas.
+     Burnt orange ties them to the primary actions without losing contrast. */
+  background: #3d5944;
+  color: var(--panel);
+  border-bottom: 3px solid var(--sar-orange);
+}
+
+/* The map's Center on drone button stays legible against the dark header. */
+.panel__header .btn {
+  background: var(--panel);
+  color: var(--ink);
+  border-color: #cdbca6;
+}
+
+.panel__header .btn:disabled {
+  opacity: 0.65;
+}
+
+/* The detections queue count is an informational badge, not an action. */
+.panel__header .panel__badge {
+  color: var(--panel);
+  border-color: rgb(255 249 239 / 0.55);
 }
 
 .panel__title {

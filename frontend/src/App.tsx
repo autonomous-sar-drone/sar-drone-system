@@ -1,19 +1,26 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { DroneViewPanel } from './features/camera/DroneViewPanel';
 import { DetectionsPanel } from './features/detections/DetectionsPanel';
 import { MapPanel } from './features/map/MapPanel';
 import { MissionControls } from './features/mission/MissionControls';
 import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
 import { useMissionCommands } from './features/mission/useMissionCommands';
+import { useDetections } from './features/detections/useDetections';
 import { usePlanning } from './features/planning/usePlanning';
 import { TelemetryPanel } from './features/telemetry/TelemetryPanel';
 import { useEvents } from './features/events/useEvents';
+import type { MapFocus } from './features/map/MapView';
+import type { DetectionCandidate } from './types/detections';
 import './dashboard.css';
 
 export default function App() {
-  const { reading, status, nowMs, mission } = useEvents();
+  const { reading, status, nowMs, mission, vision, detection, reconnectGeneration, socketOpen } =
+    useEvents();
   const { state: planning, dispatch, generate } = usePlanning();
   const commands = useMissionCommands();
+  const detections = useDetections(detection, { reconnectGeneration, connected: socketOpen });
+  // "Show on map" centres without recording any decision, so it is a request, not state.
+  const [mapFocus, setMapFocus] = useState<MapFocus | null>(null);
   const [dismissedCompletedId, setDismissedCompletedId] = useState<string | null>(null);
 
   // The backend keeps the terminal snapshot until a new preview is requested.
@@ -30,6 +37,18 @@ export default function App() {
     dispatch({ type: 'START_NEW_SEARCH' });
     commands.dismissError();
   }
+
+  const showOnMap = useCallback((candidate: DetectionCandidate) => {
+    const location = candidate.estimatedLocation;
+    // No fabricated point: a candidate with no position has nothing to centre on.
+    if (location === null) return;
+    setMapFocus((current) => ({
+      latitudeDeg: location.latitudeDeg,
+      longitudeDeg: location.longitudeDeg,
+      // Re-requesting the same candidate must still move the map.
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
+  }, []);
 
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
@@ -49,11 +68,19 @@ export default function App() {
         <h1>SAR operator console</h1>
       </header>
       <main className="dashboard">
-        <MapPanel planning={planning} dispatch={dispatch} route={planning.currentRoute} drone={drone} />
+        <MapPanel
+          planning={planning}
+          dispatch={dispatch}
+          route={planning.currentRoute}
+          drone={drone}
+          detections={detections.candidates}
+          focus={mapFocus}
+          onSelectDetection={detections.select}
+        />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
         <MissionStatusPanel planning={planning} mission={visibleMission} />
-        <DroneViewPanel />
-        <DetectionsPanel />
+        <DroneViewPanel vision={vision} mission={visibleMission} />
+        <DetectionsPanel detections={detections} nowMs={nowMs} onShowOnMap={showOnMap} />
         <MissionControls
           planning={planning}
           dispatch={dispatch}

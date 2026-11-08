@@ -1,39 +1,26 @@
+/* Field Manual: projector-friendly warm light console, independent of system dark mode. */
 :root {
-  /* Light, high-contrast default: operators may be outdoors in daylight. */
-  --surface: #eef1f0;
-  --panel: #ffffff;
-  --ink: #15202b;
-  --ink-2: #52606d;
-  --rule: #d5dbdf;
-  --sar-orange: #e8481c;
-  --live: #17784a;
-  --live-tint: #e3f2ea;
-  --stale: #a15c00;
-  --offline: #b3261e;
-  --neutral-tint: #e4e8eb;
+  color-scheme: light;
+  --surface: #f1e6d5;
+  --panel: #fff9ef;
+  --ink: #283229;
+  --ink-2: #575f53;
+  --rule: #cdbca6;
+  --sar-orange: #a74725;
+  --live: #285d41;
+  --live-tint: #e5eee3;
+  --stale: #96521f;
+  --offline: #a32b25;
+  --neutral-tint: #eee4d5;
+  --accent: #285d41;
 
-  /* System stack on purpose: the console must work with no internet, so no web fonts. */
+  /* Use bundled system fonts so the console works without a network connection. */
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 16px;
   line-height: 1.45;
   color: var(--ink);
   background: var(--surface);
   -webkit-font-smoothing: antialiased;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --surface: #121a21;
-    --panel: #1b252e;
-    --ink: #e6ecef;
-    --ink-2: #9aa8b3;
-    --rule: #2c3944;
-    --live: #3cc47e;
-    --live-tint: #16302a;
-    --stale: #f0a531;
-    --offline: #ff6b61;
-    --neutral-tint: #24313b;
-  }
 }
 
 *,
@@ -74,8 +61,10 @@ dd {
   align-items: center;
   gap: 0.75rem;
   padding: 1rem clamp(1rem, 4vw, 2rem);
-  background: var(--panel);
-  border-bottom: 1px solid var(--rule);
+  background: #3d5944;
+  color: var(--panel);
+  border-bottom: 3px solid var(--sar-orange);
+  flex-shrink: 0;
 }
 
 .app-header__mark {

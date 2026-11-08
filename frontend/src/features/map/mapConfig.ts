@@ -18,7 +18,7 @@ const DEV_ONLINE_STYLE: StyleSpecification = {
     },
   },
   layers: [
-    { id: 'background', type: 'background', paint: { 'background-color': '#e8ebe9' } },
+    { id: 'background', type: 'background', paint: { 'background-color': '#eee4d2' } },
     { id: 'dev-osm', type: 'raster', source: 'dev-osm' },
   ],
 };
@@ -47,12 +47,16 @@ export const SNAP_PX = 14;
  * Search area (orange) and route (blue) are deliberately far apart in hue.
  */
 export const MAP_COLORS = {
-  area: '#e8481c',
+  area: '#a74725',
   areaError: '#c62828',
   blocked: '#b0002a',
-  route: '#1f6feb',
+  route: '#315e90',
   casing: '#ffffff',
-  drone: '#15202b',
-  droneHeading: '#15202b',
-  routeStart: '#17784a',
+  drone: '#283229',
+  droneHeading: '#283229',
+  routeStart: '#285d41',
+  // Confirmed sightings use the forest-green person marker; pending use orange triangles.
+  detectionConfirmed: '#285d41',
+  detectionPending: '#b86625',
+  detectionStroke: '#285d41',
 } as const;

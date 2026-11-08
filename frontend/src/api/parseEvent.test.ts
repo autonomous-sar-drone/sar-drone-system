@@ -117,3 +117,144 @@ describe('parseEvent: mission_update', () => {
     expect(result).toEqual({ kind: 'unknown_type', type: 'coverage_update' });
   });
 });
+
+describe('parseEvent: vision_status', () => {
+  const data = {
+    sessionId: 'vision-session-abc123',
+    revision: 3,
+    timestamp: '2026-11-02T20:00:00.000Z',
+    camera: { state: 'LIVE', lastFrameAt: '2026-11-02T20:00:00.000Z' },
+    detector: { state: 'UNAVAILABLE', lastInferenceAt: null },
+    cameraOutageSeconds: null,
+    automaticRtlTriggered: false,
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'vision_status', data: d }));
+
+  it('reads a healthy status', () => {
+    const result = frame(data);
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.camera.state).toBe('LIVE');
+      expect(result.message.data.detector.lastInferenceAt).toBeNull();
+      expect(result.message.data.revision).toBe(3);
+    }
+  });
+
+  it('accepts the explicit nulls this event sends', () => {
+    // vision_status is serialized WITHOUT exclude_none, unlike the other two events.
+    const result = frame({ ...data, cameraOutageSeconds: null, camera: { state: 'STARTING', lastFrameAt: null } });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.cameraOutageSeconds).toBeNull();
+      expect(result.message.data.camera.lastFrameAt).toBeNull();
+    }
+  });
+
+  it('reads an outage with the automatic return home', () => {
+    const result = frame({
+      ...data,
+      camera: { state: 'UNAVAILABLE', lastFrameAt: '2026-11-02T19:59:00.000Z' },
+      cameraOutageSeconds: 61.5,
+      automaticRtlTriggered: true,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'vision_status') {
+      expect(result.message.data.cameraOutageSeconds).toBeCloseTo(61.5);
+      expect(result.message.data.automaticRtlTriggered).toBe(true);
+    }
+  });
+
+  it('rejects a health state the frontend does not know', () => {
+    const result = frame({ ...data, camera: { state: 'DEGRADED', lastFrameAt: null } });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'vision_status: camera.state is missing or unrecognized: DEGRADED',
+    });
+  });
+
+  it('rejects a missing automaticRtlTriggered rather than assuming false', () => {
+    const { automaticRtlTriggered: _omitted, ...rest } = data;
+    expect(frame(rest).kind).toBe('invalid');
+  });
+
+  it('rejects a non-numeric outage', () => {
+    expect(frame({ ...data, cameraOutageSeconds: 'a while' }).kind).toBe('invalid');
+  });
+});
+
+describe('parseEvent: detection_update', () => {
+  const candidate = {
+    candidateId: 'cand-1',
+    candidateNumber: 1,
+    executionId: null,
+    status: 'PENDING',
+    firstObservedAt: '2026-11-04T15:00:00.000Z',
+    capturedAt: '2026-11-04T15:00:01.000Z',
+    publishedAt: '2026-11-04T15:00:02.000Z',
+    reviewedAt: null,
+    confidence: 0.91,
+    boundingBox: {
+      xPx: 10, yPx: 20, widthPx: 30, heightPx: 40, frameWidthPx: 1280, frameHeightPx: 720,
+    },
+    estimatedLocation: null,
+    snapshotUrl: '/api/detections/cand-1/snapshot',
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'detection_update', data: d }));
+
+  it('reads a candidate update', () => {
+    const result = frame({ sessionId: 's1', revision: 7, candidate });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'detection_update') {
+      expect(result.message.data.revision).toBe(7);
+      expect(result.message.data.candidate.candidateId).toBe('cand-1');
+      expect(result.message.data.candidate.estimatedLocation).toBeNull();
+    }
+  });
+
+  it('rejects an update whose candidate does not match the contract', () => {
+    const result = frame({ sessionId: 's1', revision: 7, candidate: { candidateId: 'x' } });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'detection_update: candidate is missing or does not match the contract',
+    });
+  });
+
+  it('rejects a missing revision', () => {
+    expect(frame({ sessionId: 's1', candidate }).kind).toBe('invalid');
+  });
+});
+
+describe('parseEvent: mission interruptionReason', () => {
+  const base = {
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    missionState: 'RETURNING_HOME',
+    timestamp: '2026-11-07T15:00:00.000Z',
+  };
+  const frame = (d: unknown) => parseEvent(JSON.stringify({ type: 'mission_update', data: d }));
+
+  it('keeps the backend reason for a return', () => {
+    const result = frame({ ...base, interruptionReason: 'CAMERA_UNAVAILABLE' });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.interruptionReason).toBe('CAMERA_UNAVAILABLE');
+    }
+  });
+
+  it('treats an absent reason as none, since the event uses exclude_none', () => {
+    const result = frame(base);
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok' && result.message.type === 'mission_update') {
+      expect(result.message.data.interruptionReason).toBeNull();
+    }
+  });
+
+  it('rejects a reason the frontend does not know rather than dropping it', () => {
+    // Silently discarding it is what hid the reason from the operator before.
+    const result = frame({ ...base, interruptionReason: 'BATTERY_LOW' });
+    expect(result).toEqual({
+      kind: 'invalid',
+      reason: 'mission_update: interruptionReason is unrecognized: BATTERY_LOW',
+    });
+  });
+});

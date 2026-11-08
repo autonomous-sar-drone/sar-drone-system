@@ -39,6 +39,17 @@ export interface ActiveTarget extends LatLon {
   altitudeReference: AltitudeReference;
 }
 
+/**
+ * Why the backend interrupted the mission itself. Mirrors InterruptionReason in
+ * app/domain/models/mission_execution.py. Null when nothing interrupted it.
+ */
+export type InterruptionReason = 'CAMERA_UNAVAILABLE' | 'OPERATOR_STOP';
+
+export const INTERRUPTION_REASONS: readonly InterruptionReason[] = [
+  'CAMERA_UNAVAILABLE',
+  'OPERATOR_STOP',
+] as const;
+
 /** Body of every /api/missions/* response. */
 export interface MissionExecution {
   executionId: string;
@@ -46,6 +57,12 @@ export interface MissionExecution {
   missionState: MissionState;
   /** Absent in the payload when there is no current target; normalized to null here. */
   activeTarget: ActiveTarget | null;
+  /**
+   * The backend's own explanation for an interruption or return. Kept because it is
+   * the only authoritative account of WHY the aircraft is coming back; the frontend
+   * must never substitute a guess for it.
+   */
+  interruptionReason: InterruptionReason | null;
 }
 
 /**

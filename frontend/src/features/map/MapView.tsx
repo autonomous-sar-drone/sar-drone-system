@@ -6,9 +6,11 @@ import type { GeoJSONSource, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useEffect, useRef, useState } from 'react';
+import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import type { EditMode } from '../planning/planningState';
 import { canAppendVertex, canClose, type LatLon } from '../searchArea/geometry';
+import { DetectionMarkerLayer } from './detectionMarkerLayer';
 import { headingSegment, type DronePose } from './headingIndicator';
 import { INITIAL_ZOOM, MAP_COLORS, SNAP_PX, initialCenter, mapStyle } from './mapConfig';
 
@@ -22,12 +24,25 @@ export interface MapViewProps {
   /** Read-only. Fed from planning state's currentRoute, never edited here. */
   route: Route | null;
   drone: DronePose | null;
+  /** Reviewed and pending detections; the marker layer decides which are drawn. */
+  detections: DetectionCandidate[];
+  /** Selecting a marker moves the review queue; it never records a decision. */
+  onSelectDetection?: (candidateId: string) => void;
   /** Bump to re-center on the drone. */
   centerOnDroneRequest: number;
+  /** Where "Show on map" asked to centre. nonce changes even for the same point. */
+  focus: MapFocus | null;
   onAddVertex: (point: LatLon) => void;
   onClose: () => void;
   onMoveVertex: (index: number, point: LatLon) => void;
   onSelectVertex: (index: number | null) => void;
+}
+
+/** A request to centre the map, carried as data so the same point can be re-requested. */
+export interface MapFocus {
+  latitudeDeg: number;
+  longitudeDeg: number;
+  nonce: number;
 }
 
 type FC = FeatureCollection;
@@ -38,7 +53,9 @@ const toLatLon = (l: maplibregl.LngLat): LatLon => ({ latitudeDeg: l.lat, longit
 const toCoord = (p: LatLon): [number, number] => [p.longitudeDeg, p.latitudeDeg];
 
 /** Each concern is its own source + layers so later coverage/trail layers slot in beside them. */
-const SOURCES = ['search-area', 'route', 'draw-preview', 'vertices', 'drone-heading', 'drone'] as const;
+const SOURCES = [
+  'search-area', 'route', 'draw-preview', 'vertices', 'drone-heading', 'drone', 'detections',
+] as const;
 
 function addLayers(map: maplibregl.Map) {
   for (const id of SOURCES) map.addSource(id, { type: 'geojson', data: EMPTY });
@@ -304,7 +321,7 @@ export function MapView(props: MapViewProps) {
     };
   }, []);
 
-  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, centerOnDroneRequest } =
+  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest, focus } =
     props;
 
   // Search-area polygon (closed) or polyline (still drawing).
@@ -378,6 +395,36 @@ export function MapView(props: MapViewProps) {
       map.jumpTo({ center: toCoord(drone) });
     }
   }, [ready, drone]);
+
+  // Detection markers are DOM overlays, not a layer: they carry a visible number and
+  // need a real hover target, neither of which a glyph-less symbol layer can give.
+  const markerLayer = useRef<DetectionMarkerLayer | null>(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const layer = new DetectionMarkerLayer(map, {
+      onSelect: (candidateId) => propsRef.current.onSelectDetection?.(candidateId),
+    });
+    markerLayer.current = layer;
+    layer.sync(propsRef.current.detections);
+    return () => {
+      layer.destroy();
+      markerLayer.current = null;
+    };
+  }, [ready]);
+
+  useEffect(() => {
+    markerLayer.current?.sync(detections);
+  }, [detections]);
+
+  // "Show on map": centre on a candidate without changing anything about it.
+  const focusNonce = focus?.nonce ?? 0;
+  useEffect(() => {
+    const map = mapRef.current;
+    const target = propsRef.current.focus;
+    if (!map || focusNonce === 0 || !target) return;
+    map.easeTo({ center: [target.longitudeDeg, target.latitudeDeg], zoom: 18, duration: 400 });
+  }, [focusNonce]);
 
   useEffect(() => {
     const map = mapRef.current;
