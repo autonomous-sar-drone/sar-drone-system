@@ -81,7 +81,7 @@ def test_five_actions_return_frontend_contract() -> None:
     assert started.status_code == 200
     assert started.json() == {
         "executionId": "execution-123", "planId": "plan-123",
-        "missionState": "RUNNING", "activeTarget": {
+        "missionState": "RUNNING", "interruptionReason": None, "activeTarget": {
             "latitudeDeg": 30.2674, "longitudeDeg": -97.7430,
             "altitudeM": 25.0, "altitudeReference": "HOME_RELATIVE",
         },

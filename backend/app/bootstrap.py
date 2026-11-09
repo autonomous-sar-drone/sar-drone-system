@@ -9,6 +9,21 @@ from app.core.config import (
     LANDING_ALTITUDE_TOLERANCE_M,
     LANDING_SPEED_TOLERANCE_MPS,
     MAVLINK_ENDPOINT,
+    CAMERA_RECEIVER_HOST,
+    CAMERA_RECEIVER_PORT,
+    CAMERA_STALE_AFTER_S,
+    CAMERA_STARTUP_GRACE_S,
+    CAMERA_RTL_OUTAGE_S,
+    CAMERA_WATCHDOG_POLL_S,
+    CAMERA_STREAM_MAX_FPS,
+    CAMERA_STREAM_WIDTH_PX,
+    CAMERA_STREAM_JPEG_QUALITY,
+    VISION_DETECTOR_ENABLED, VISION_YOLO_MODEL, VISION_YOLO_TRACKER,
+    VISION_YOLO_CONFIDENCE, VISION_YOLO_IMAGE_SIZE, VISION_YOLO_DEVICE,
+    VISION_INFERENCE_MAX_FPS, VISION_OVERLAY_MAX_AGE_S,
+    VISION_DETECTOR_STALE_AFTER_S,
+    VISION_CANDIDATE_CONFIRMATION_S, VISION_CANDIDATE_GRACE_S,
+    VISION_CANDIDATE_MIN_OBSERVATIONS,
     MAX_ROUTE_DISTANCE_M,
     MAX_TELEMETRY_AGE_S,
     MAX_TRANSIT_DISTANCE_M,
@@ -23,6 +38,15 @@ from app.runtime.mission_hub import MissionHub
 from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.mavlink_telemetry import create_mavlink_connection
 from app.vehicle.mavlink_vehicle import MavlinkVehicle
+from app.vision.camera_receiver import CameraReceiver
+from app.vision.vision_runtime import VisionRuntime
+from app.vision.camera_safety import CameraSafetyWatchdog
+from app.vision.candidate_store import CandidateStore
+from app.vision.person_detector import YoloPersonTracker
+from app.vision.candidate_publisher import CandidatePublisher, CandidatePublicationWorker
+from app.vehicle.pose_history import PoseHistory
+from app.vision.camera_geometry import load_camera_geometry
+from app.vision.person_localization import PersonLocalizer
 
 
 @asynccontextmanager
@@ -30,7 +54,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     telemetry_hub = TelemetryHub()
     mission_hub = MissionHub()
     connection = create_mavlink_connection(MAVLINK_ENDPOINT)
-    vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub)
+    pose_history = PoseHistory()
+    vehicle = MavlinkVehicle(connection=connection, telemetry_hub=telemetry_hub,
+                             pose_history=pose_history)
+    localizer = PersonLocalizer(pose_history, load_camera_geometry())
+
+    camera_receiver = CameraReceiver(host=CAMERA_RECEIVER_HOST, port=CAMERA_RECEIVER_PORT)
+    person_detector = YoloPersonTracker(
+        model_path=VISION_YOLO_MODEL, tracker=VISION_YOLO_TRACKER,
+        confidence=VISION_YOLO_CONFIDENCE, image_size=VISION_YOLO_IMAGE_SIZE,
+        device=VISION_YOLO_DEVICE,
+    ) if VISION_DETECTOR_ENABLED else None
+    vision_runtime = VisionRuntime(
+        camera_receiver, stale_after_s=CAMERA_STALE_AFTER_S,
+        startup_grace_s=CAMERA_STARTUP_GRACE_S, max_stream_fps=CAMERA_STREAM_MAX_FPS,
+        stream_width_px=CAMERA_STREAM_WIDTH_PX, stream_jpeg_quality=CAMERA_STREAM_JPEG_QUALITY,
+        detector=person_detector, max_inference_fps=VISION_INFERENCE_MAX_FPS,
+        overlay_max_age_s=VISION_OVERLAY_MAX_AGE_S,
+        detector_stale_after_s=VISION_DETECTOR_STALE_AFTER_S,
+    )
+
+    candidate_store = CandidateStore(session_id=vision_runtime.session_id)
+    candidate_publisher = CandidatePublisher(
+        candidate_store, confirmation_s=VISION_CANDIDATE_CONFIRMATION_S,
+        grace_s=VISION_CANDIDATE_GRACE_S,
+        min_observations=VISION_CANDIDATE_MIN_OBSERVATIONS,
+        localizer=localizer,
+    )
+    candidate_worker = CandidatePublicationWorker(vision_runtime, candidate_publisher)
 
     mission_service = MissionService(
         telemetry_hub=telemetry_hub,
@@ -49,6 +100,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         takeoff_timeout_s=TAKEOFF_TIMEOUT_S,
         landing_altitude_tolerance_m=LANDING_ALTITUDE_TOLERANCE_M,
         landing_speed_tolerance_mps=LANDING_SPEED_TOLERANCE_MPS,
+        camera_available=vision_runtime.camera_ready,
+    )
+    camera_watchdog = CameraSafetyWatchdog(
+        vision_runtime, mission_service,
+        outage_after_s=CAMERA_RTL_OUTAGE_S,
+        poll_period_s=CAMERA_WATCHDOG_POLL_S,
     )
 
     # share these instances between the HTTP routes, WebSocket, and mission monitor
@@ -56,13 +113,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mission_hub = mission_hub
     app.state.mission_service = mission_service
     app.state.vehicle = vehicle
+    app.state.camera_receiver = camera_receiver
+    app.state.vision_runtime = vision_runtime
+    app.state.candidate_store = candidate_store
+    app.state.pose_history = pose_history
+    app.state.candidate_publisher = candidate_publisher
+    app.state.candidate_worker = candidate_worker
+    app.state.camera_watchdog = camera_watchdog
 
     try:
         # one MAVLink reader handles aircraft messages and forwards position samples
         # to TelemetryHub, separate receivers could consume each other's messages
         await vehicle.start()
+        camera_receiver.start()
+        candidate_worker.start()  # subscribe before first inference can be emitted
+        await vision_runtime.start()
+        camera_watchdog.start()
         yield
     finally:
-        # stop mission monitoring before closing the vehicle connection
+        # stop the safety observer before stopping mission/vehicle control
+        await camera_watchdog.stop()
         await mission_service.shutdown()
+        await vision_runtime.stop()
+        await candidate_worker.stop()
+        camera_receiver.stop()
         await vehicle.stop()

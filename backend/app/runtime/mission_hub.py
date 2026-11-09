@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.domain.models.mission_execution import MissionExecution
+from app.domain.models.mission_execution import MissionExecution, InterruptionReason
 from app.domain.models.mission_state import MissionState
 from app.domain.models.route import Waypoint
 from app.mission.errors import MissionExecutionError
@@ -23,6 +23,7 @@ class MissionSnapshot:
     state: MissionState
     active_target: Waypoint | None
     runtime_error: MissionRuntimeError | None = None
+    interruption_reason: InterruptionReason | None = None
 
 
 class MissionHub:
@@ -43,6 +44,7 @@ class MissionHub:
             plan_id=execution.plan_id,
             state=execution.state,
             active_target=execution.active_target,
+            interruption_reason=execution.interruption_reason,
             # copy error details too, since the original dictionary can still change
             runtime_error=MissionRuntimeError(
                 code=runtime_error.code.value,

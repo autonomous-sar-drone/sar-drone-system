@@ -38,6 +38,7 @@ def test_execution_response_matches_frontend_contract() -> None:
         "executionId": "execution-456",
         "planId": "plan-123",
         "missionState": "RUNNING",
+        "interruptionReason": None,
         "activeTarget": {
             "latitudeDeg": 30.2674,
             "longitudeDeg": -97.7430,
@@ -61,5 +62,6 @@ def test_execution_response_allows_no_active_target() -> None:
         "executionId": "execution-456",
         "planId": "plan-123",
         "missionState": "RETURNING_HOME",
+        "interruptionReason": None,
         "activeTarget": None,
     }

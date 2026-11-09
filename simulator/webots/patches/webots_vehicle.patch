@@ -1,0 +1,82 @@
+--- a/libraries/SITL/examples/Webots_Python/controllers/ardupilot_vehicle_controller/webots_vehicle.py
++++ b/libraries/SITL/examples/Webots_Python/controllers/ardupilot_vehicle_controller/webots_vehicle.py
+@@ -13,8 +13,9 @@
+ import struct
+ import numpy as np
+ from threading import Thread
+ from typing import List, Union
++from sar_camera_publisher import SarCameraPublisher
+ 
+ # Here we set up environment variables so we can run this script
+ # as an external controller outside of Webots (useful for debugging)
+ # https://cyberbotics.com/doc/guide/running-extern-robot-controllers
+@@ -54,8 +55,10 @@
+                  gps_name: str = "gps",
+                  camera_name: str = None,
+                  camera_fps: int = 10,
+                  camera_stream_port: int = None,
++                 sar_camera_host: str = None,
++                 sar_camera_port: int = None,
+                  rangefinder_name: str = None,
+                  rangefinder_fps: int = 10,
+                  rangefinder_stream_port: int = None,
+                  instance: int = 0,
+@@ -114,12 +117,22 @@
+         self.imu.enable(self._timestep)
+         self.gyro.enable(self._timestep)
+         self.gps.enable(self._timestep)
+ 
++        self._sar_publisher = None
++        self._sar_camera_last_capture_s = None
++        self._sar_frame_number = 0
+         # init camera
+         if camera_name is not None:
+             self.camera = self.robot.getDevice(camera_name)
+             self.camera.enable(1000//camera_fps) # takes frame period in ms
++            if sar_camera_host and sar_camera_port:
++                try:
++                    from PIL import Image  # noqa: F401
++                    self._sar_publisher = SarCameraPublisher(sar_camera_host, sar_camera_port)
++                except ImportError:
++                    print("SAR camera not enabled: Pillow missing from Webots Python. "
++                          "Flight-control bridge continues without camera frames.")
+ 
+             # start camera streaming thread if requested
+             if camera_stream_port is not None:
+                 self._camera_thread = Thread(daemon=True,
+@@ -197,13 +210,35 @@
+                 # wait until the next Webots time step as no new sensor data will be available until then
+                 step_success = self.robot.step(self._timestep)
+                 if step_success == -1: # webots closed
+                     break
++                self._offer_sar_frame()
+ 
+         # if we leave the main loop then Webots must have closed
+         s.close()
++        if self._sar_publisher is not None:
++            self._sar_publisher.stop()
+         self._webots_connected = False
+         print(f"Lost connection to Webots (I{self._instance})")
++
++    def _offer_sar_frame(self):
++        # This method runs on the SAME thread that calls robot.step(). Never use
++        # Camera.getImage() from the publisher's background networking thread.
++        if self._sar_publisher is None:
++            return
++        sim_time_s = self.robot.getTime()
++        sample_s = self.camera.getSamplingPeriod() / 1000.0
++        last = self._sar_camera_last_capture_s
++        if last is not None and sim_time_s >= last and sim_time_s - last < sample_s - 1e-6:
++            return
++        raw = self.camera.getImage()
++        if raw is None:
++            return
++        self._sar_camera_last_capture_s = sim_time_s
++        self._sar_frame_number += 1
++        self._sar_publisher.offer(raw, self._sar_frame_number,
++                                  self.camera.getWidth(), self.camera.getHeight(),
++                                  sim_time_s, self.camera.getFov())
+ 
+     def _get_fdm_struct(self) -> bytes:
+         """Form the Flight Dynamics Model struct (aka sensor data) to send to the SITL
+ 

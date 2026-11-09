@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,11 +11,13 @@ from app.domain.models.vehicle_status import VehicleStatus
 from app.runtime.telemetry_hub import TelemetryHub
 from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_telemetry import normalize_global_position_int
+from app.vehicle.pose_history import PoseHistory
 
 
 # the position target message has several optional controls
 # this mask uses only latitude, longitude, and altitude
 POSITION_ONLY_TYPE_MASK = 0b110111111000
+LOG = logging.getLogger(__name__)
 
 
 def _get_mavlink() -> Any:
@@ -34,11 +38,13 @@ class MavlinkVehicle:
         telemetry_hub: TelemetryHub,
         heartbeat_timeout_s: float = 3.0,
         command_timeout_s: float = 5.0,
+        pose_history: PoseHistory | None = None,
     ) -> None:
         self._connection = connection
         self._telemetry_hub = telemetry_hub
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._command_timeout_s = command_timeout_s
+        self._pose_history = pose_history
 
         # telemetry sequences are local to this backend, not MAVLink packet numbers
         self._telemetry_sequence = 0
@@ -101,6 +107,13 @@ class MavlinkVehicle:
             await self._request_global_position_interval(
                 telemetry_rate_hz
             )
+            if self._pose_history is not None:
+                # An unavailable attitude stream must not break flight startup;
+                # candidate locations remain null if no fresh pose arrives.
+                try:
+                    await self._request_attitude_interval(10.0)
+                except (VehicleCommandError, TimeoutError) as exc:
+                    LOG.warning("MAVLink ATTITUDE stream request unavailable: %s", exc)
         except Exception:
             # close the receiver and connection if startup fails partway through
             await self.stop()
@@ -248,6 +261,8 @@ class MavlinkVehicle:
         message_type = message.get_type()
 
         if message_type == "GLOBAL_POSITION_INT":
+            if self._pose_history is not None:
+                self._pose_history.add_position(message)
             self._telemetry_sequence += 1
 
             sample = normalize_global_position_int(
@@ -257,6 +272,11 @@ class MavlinkVehicle:
 
             # publish position in the shared format used by the rest of the backend
             await self._telemetry_hub.publish(sample)
+            return
+
+        if message_type == "ATTITUDE":
+            if self._pose_history is not None:
+                self._pose_history.add_attitude(message)
             return
 
         if message_type == "HEARTBEAT":
@@ -327,6 +347,16 @@ class MavlinkVehicle:
                 0.0,
                 0.0,
             ),
+        )
+
+    async def _request_attitude_interval(self, rate_hz: float) -> None:
+        if rate_hz <= 0:
+            raise ValueError("attitude rate must be positive")
+        mavlink = _get_mavlink()
+        await self._send_command_long_and_wait(
+            mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            (float(mavlink.MAVLINK_MSG_ID_ATTITUDE), float(int(1_000_000 / rate_hz)),
+             0.0, 0.0, 0.0, 0.0, 0.0),
         )
 
     async def _send_command_long_and_wait(
