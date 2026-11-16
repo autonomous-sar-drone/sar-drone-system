@@ -65,3 +65,6 @@ VISION_DETECTOR_STALE_AFTER_S: float = float(os.getenv("VISION_DETECTOR_STALE_AF
 VISION_CANDIDATE_CONFIRMATION_S: float = float(os.getenv("VISION_CANDIDATE_CONFIRMATION_S", "1.0"))
 VISION_CANDIDATE_GRACE_S: float = float(os.getenv("VISION_CANDIDATE_GRACE_S", "2.0"))
 VISION_CANDIDATE_MIN_OBSERVATIONS: int = int(os.getenv("VISION_CANDIDATE_MIN_OBSERVATIONS", "2"))
+
+# Optional saved Webots elevation grid. Loading does not enable terrain-following flight.
+SAR_TERRAIN_JSON: str = os.getenv("SAR_TERRAIN_JSON", "")

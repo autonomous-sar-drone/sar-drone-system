@@ -31,7 +31,9 @@ from app.core.config import (
     TAKEOFF_TIMEOUT_S,
     TARGET_ALTITUDE_TOLERANCE_M,
     TARGET_REACHED_TOLERANCE_M,
+    SAR_TERRAIN_JSON,
 )
+from app.geospatial.terrain_grid import load_configured_terrain
 from app.domain.models.route import PlanningSettings
 from app.mission.mission_service import MissionService
 from app.runtime.mission_hub import MissionHub
@@ -51,6 +53,7 @@ from app.vision.person_localization import PersonLocalizer
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.terrain_grid = load_configured_terrain(SAR_TERRAIN_JSON)
     telemetry_hub = TelemetryHub()
     mission_hub = MissionHub()
     connection = create_mavlink_connection(MAVLINK_ENDPOINT)
