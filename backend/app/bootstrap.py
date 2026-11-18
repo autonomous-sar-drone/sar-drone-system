@@ -32,6 +32,8 @@ from app.core.config import (
     TARGET_ALTITUDE_TOLERANCE_M,
     TARGET_REACHED_TOLERANCE_M,
     SAR_TERRAIN_JSON,
+    SAR_TERRAIN_WAYPOINT_SPACING_M,
+    SAR_TERRAIN_LOOKAHEAD_M,
 )
 from app.geospatial.terrain_grid import load_configured_terrain
 from app.domain.models.route import PlanningSettings
@@ -54,6 +56,8 @@ from app.vision.person_localization import PersonLocalizer
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.terrain_grid = load_configured_terrain(SAR_TERRAIN_JSON)
+    if app.state.terrain_grid is None:
+        raise RuntimeError("Terrain elevation data is required for this backend")
     telemetry_hub = TelemetryHub()
     mission_hub = MissionHub()
     connection = create_mavlink_connection(MAVLINK_ENDPOINT)
@@ -104,6 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         landing_altitude_tolerance_m=LANDING_ALTITUDE_TOLERANCE_M,
         landing_speed_tolerance_mps=LANDING_SPEED_TOLERANCE_MPS,
         camera_available=vision_runtime.camera_ready,
+        terrain_grid=app.state.terrain_grid,
+        terrain_step_m=SAR_TERRAIN_WAYPOINT_SPACING_M,
+        terrain_lookahead_m=SAR_TERRAIN_LOOKAHEAD_M,
     )
     camera_watchdog = CameraSafetyWatchdog(
         vision_runtime, mission_service,
