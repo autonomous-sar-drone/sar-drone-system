@@ -38,6 +38,8 @@ function candidate(
         }
       : null,
     snapshotUrl: `/api/detections/cand-${candidateNumber}/snapshot`,
+    revisitAvailable: false,
+    revisitUnavailableReason: null,
   };
 }
 

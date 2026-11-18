@@ -1,4 +1,5 @@
 import { parseCandidate } from './detectionsClient';
+import { parseFlightActivity, parseHoldReason } from './missionsClient';
 import type { DetectionUpdateData } from '../types/detections';
 import type { EventMessage } from '../types/events';
 import {
@@ -138,6 +139,17 @@ function parseMissionData(raw: unknown): MissionUpdateData | string {
     runtimeError,
     interruptionReason,
     timestamp: d.timestamp,
+    // PHASE 2. Unlike the fields above, an unrecognized value here is NOT a parse
+    // failure. These arrive on the same socket the whole console depends on, and a
+    // backend that adds an activity this build has not seen must not be able to stop
+    // telemetry, state and errors from reaching the operator.
+    flightActivity: parseFlightActivity(d.flightActivity),
+    holdReason: parseHoldReason(d.holdReason),
+    activeRevisitCandidateId:
+      typeof d.activeRevisitCandidateId === 'string' && d.activeRevisitCandidateId !== ''
+        ? d.activeRevisitCandidateId
+        : null,
+    manualControlReady: d.manualControlReady === true,
   };
 }
 

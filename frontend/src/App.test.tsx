@@ -24,6 +24,10 @@ function missionUpdate(missionState: MissionState, extra: Partial<MissionUpdateD
     activeTarget: null,
     runtimeError: null,
     interruptionReason: null,
+    flightActivity: null,
+    holdReason: null,
+    activeRevisitCandidateId: null,
+    manualControlReady: false,
     timestamp: '2026-10-26T16:00:00Z',
     ...extra,
   };
@@ -424,5 +428,164 @@ describe('detections on the map', () => {
     const button = await screen.findByRole('button', { name: 'Show on map' });
     await act(async () => fireEvent.click(button));
     expect(map()).toHaveAttribute('data-focus', '30.2291,-97.7555');
+  });
+});
+
+/* ------------------------------------------------------------------ PHASE 2 */
+
+describe('manual control and revisit in the action row', () => {
+  const PHASE_2 = { flightActivity: 'SEARCHING', manualControlReady: true } as const;
+
+  it('offers Take controls while searching, and keeps it in the same slot', () => {
+    events = { ...events, mission: missionUpdate('RUNNING', PHASE_2) };
+    render(<App />);
+
+    const buttons = controls().getAllByRole('button');
+    expect(buttons[0]).toHaveTextContent('Take controls');
+    expect(buttons[0]).toBeEnabled();
+    expect(controls().queryByRole('button', { name: 'Give controls' })).toBeNull();
+  });
+
+  it('swaps Take for Give in that same slot once manual control is active', () => {
+    events = {
+      ...events,
+      mission: missionUpdate('PAUSED', { flightActivity: 'MANUAL_CONTROL', manualControlReady: true }),
+    };
+    render(<App />);
+
+    const buttons = controls().getAllByRole('button');
+    expect(buttons[0]).toHaveTextContent('Give controls');
+    expect(controls().queryByRole('button', { name: 'Take controls' })).toBeNull();
+    // Resuming the search straight out of manual flight is not offered.
+    expect(controls().getByRole('button', { name: 'Resume search' })).toBeDisabled();
+  });
+
+  it('disables the Phase 2 actions, with a reason, against a backend that lacks them', () => {
+    events = { ...events, mission: missionUpdate('RUNNING') };
+    render(<App />);
+
+    const take = controls().getByRole('button', { name: 'Take controls' });
+    expect(take).toBeDisabled();
+    expect(take).toHaveAttribute('title', 'Needs the updated backend.');
+    // The existing controls are untouched.
+    expect(controls().getByRole('button', { name: 'Pause' })).toBeEnabled();
+    expect(controls().getByRole('button', { name: 'Stop and return home' })).toBeEnabled();
+  });
+
+  it('posts take-controls to the execution', async () => {
+    const fetchMock = mockFetch(200, {
+      executionId: 'exec-1',
+      planId: 'plan-1',
+      missionState: 'PAUSED',
+      flightActivity: 'MANUAL_CONTROL',
+    });
+    events = { ...events, mission: missionUpdate('RUNNING', PHASE_2) };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Take controls' })));
+    expect(callTo(fetchMock, '/api/missions/exec-1/take-controls')).toBeTruthy();
+  });
+
+  it('holds every other action while a command is in flight', async () => {
+    let release: (value: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fn = vi.fn(async (url: string) => {
+      if (url === '/api/detections') {
+        return new Response(JSON.stringify(EMPTY_DETECTIONS), { status: 200 });
+      }
+      return pending;
+    });
+    vi.stubGlobal('fetch', fn);
+    events = { ...events, mission: missionUpdate('RUNNING', PHASE_2) };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Take controls' })));
+
+    // Two requests racing for ownership of one aircraft is the case where the
+    // loser's response leaves the console showing the wrong side of a handover.
+    expect(controls().getByRole('button', { name: 'Taking controls…' })).toBeDisabled();
+    expect(controls().getByRole('button', { name: 'Pause' })).toBeDisabled();
+    expect(controls().getByRole('button', { name: 'Stop and return home' })).toBeDisabled();
+
+    await act(async () => {
+      release(new Response(JSON.stringify({ executionId: 'exec-1', planId: 'plan-1', missionState: 'PAUSED' }), { status: 200 }));
+      await pending;
+    });
+  });
+
+  it('explains a rejected takeover using the shared 409 envelope', async () => {
+    mockFetch(409, {
+      detail: { code: 'MISSION_ACTION_NOT_ALLOWED', message: 'not allowed', details: {} },
+    });
+    events = { ...events, mission: missionUpdate('RUNNING', PHASE_2) };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Take controls' })));
+
+    expect(screen.getByRole('alert')).toHaveTextContent("That isn't allowed right now");
+    // The backend still owns the state, so the row does not move itself.
+    expect(controls().getByRole('button', { name: 'Take controls' })).toBeEnabled();
+  });
+
+  it('offers Cancel revisit only while a revisit is running', () => {
+    events = { ...events, mission: missionUpdate('PAUSED', { flightActivity: 'HOLDING', holdReason: 'OPERATOR_PAUSE' }) };
+    const first = render(<App />);
+    expect(controls().queryByRole('button', { name: 'Cancel revisit' })).toBeNull();
+    first.unmount();
+
+    events = {
+      ...events,
+      mission: missionUpdate('PAUSED', {
+        flightActivity: 'REVISITING',
+        activeRevisitCandidateId: 'cand-1',
+      }),
+    };
+    render(<App />);
+    expect(controls().getByRole('button', { name: 'Cancel revisit' })).toBeEnabled();
+  });
+
+  it('posts cancel-revisit to the execution', async () => {
+    const fetchMock = mockFetch(200, { executionId: 'exec-1', planId: 'plan-1', missionState: 'PAUSED' });
+    events = {
+      ...events,
+      mission: missionUpdate('PAUSED', {
+        flightActivity: 'REVISITING',
+        activeRevisitCandidateId: 'cand-1',
+      }),
+    };
+    render(<App />);
+
+    await act(async () => fireEvent.click(controls().getByRole('button', { name: 'Cancel revisit' })));
+    expect(callTo(fetchMock, '/api/missions/exec-1/cancel-revisit')).toBeTruthy();
+  });
+
+  it('shows what the aircraft is doing, not just the lifecycle state', () => {
+    events = {
+      ...events,
+      mission: missionUpdate('PAUSED', { flightActivity: 'HOLDING', holdReason: 'REVISIT_ARRIVAL' }),
+    };
+    render(<App />);
+
+    expect(screen.getByText('Holding at viewpoint')).toBeInTheDocument();
+    expect(screen.getByText('Arrived at the stored viewpoint')).toBeInTheDocument();
+  });
+
+  it('shows the key legend only while manual control is active', () => {
+    events = { ...events, mission: missionUpdate('RUNNING', PHASE_2) };
+    const first = render(<App />);
+    expect(screen.queryByLabelText('Manual flight keys')).toBeNull();
+    first.unmount();
+
+    events = {
+      ...events,
+      mission: missionUpdate('PAUSED', { flightActivity: 'MANUAL_CONTROL', manualControlReady: true }),
+    };
+    render(<App />);
+    const legend = screen.getByLabelText('Manual flight keys');
+    expect(within(legend).getByText('Forward / back')).toBeInTheDocument();
+    expect(within(legend).getByText('Yaw left / right')).toBeInTheDocument();
+    expect(within(legend).getByText('Climb / descend')).toBeInTheDocument();
   });
 });

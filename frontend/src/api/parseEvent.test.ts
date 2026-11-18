@@ -258,3 +258,102 @@ describe('parseEvent: mission interruptionReason', () => {
     });
   });
 });
+
+/* ------------------------------------------------------------------ PHASE 2 */
+
+describe('mission_update with the Phase 2 fields', () => {
+  const base = {
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    missionState: 'PAUSED',
+    timestamp: '2026-11-17T15:00:00.000Z',
+  };
+  const frame = (data: Record<string, unknown>) =>
+    parseEvent(JSON.stringify({ type: 'mission_update', data: { ...base, ...data } }));
+
+  it('carries activity, hold reason, revisit target and readiness', () => {
+    const result = frame({
+      flightActivity: 'MANUAL_CONTROL',
+      holdReason: 'MANUAL_RELEASE',
+      activeRevisitCandidateId: 'cand-2',
+      manualControlReady: true,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok' || result.message.type !== 'mission_update') return;
+    expect(result.message.data.flightActivity).toBe('MANUAL_CONTROL');
+    expect(result.message.data.holdReason).toBe('MANUAL_RELEASE');
+    expect(result.message.data.activeRevisitCandidateId).toBe('cand-2');
+    expect(result.message.data.manualControlReady).toBe(true);
+  });
+
+  it('accepts a frame from a backend that sends none of them', () => {
+    const result = frame({});
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok' || result.message.type !== 'mission_update') return;
+    expect(result.message.data.flightActivity).toBeNull();
+    expect(result.message.data.manualControlReady).toBe(false);
+  });
+
+  it('keeps delivering the frame when an activity is newer than this build', () => {
+    // This socket carries telemetry, state and errors. A single unrecognized value
+    // must not be able to stop all of that reaching the operator.
+    const result = frame({ flightActivity: 'ORBITING', holdReason: 'WEATHER' });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok' || result.message.type !== 'mission_update') return;
+    expect(result.message.data.missionState).toBe('PAUSED');
+    expect(result.message.data.flightActivity).toBeNull();
+    expect(result.message.data.holdReason).toBeNull();
+  });
+});
+
+describe('detection_update with the revisit fields', () => {
+  const CANDIDATE = {
+    candidateId: 'cand-1',
+    candidateNumber: 1,
+    executionId: null,
+    status: 'PENDING',
+    firstObservedAt: '2026-11-17T15:00:00.000Z',
+    capturedAt: '2026-11-17T15:00:01.000Z',
+    publishedAt: '2026-11-17T15:00:02.000Z',
+    reviewedAt: null,
+    confidence: 0.91,
+    boundingBox: {
+      xPx: 10, yPx: 20, widthPx: 30, heightPx: 40, frameWidthPx: 1280, frameHeightPx: 720,
+    },
+    estimatedLocation: null,
+    snapshotUrl: '/api/detections/cand-1/snapshot',
+  };
+
+  it('reads revisit availability and its reason', () => {
+    const result = parseEvent(
+      JSON.stringify({
+        type: 'detection_update',
+        data: {
+          sessionId: 's1',
+          revision: 2,
+          candidate: {
+            ...CANDIDATE,
+            revisitAvailable: true,
+            revisitUnavailableReason: null,
+          },
+        },
+      }),
+    );
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok' || result.message.type !== 'detection_update') return;
+    expect(result.message.data.candidate.revisitAvailable).toBe(true);
+  });
+
+  it('defaults to no revisit when the backend does not mention it', () => {
+    const result = parseEvent(
+      JSON.stringify({
+        type: 'detection_update',
+        data: { sessionId: 's1', revision: 2, candidate: CANDIDATE },
+      }),
+    );
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok' || result.message.type !== 'detection_update') return;
+    expect(result.message.data.candidate.revisitAvailable).toBe(false);
+    expect(result.message.data.candidate.revisitUnavailableReason).toBeNull();
+  });
+});

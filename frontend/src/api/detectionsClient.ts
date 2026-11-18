@@ -113,6 +113,13 @@ export function parseCandidate(raw: unknown): DetectionCandidate | null {
     boundingBox,
     estimatedLocation,
     snapshotUrl: raw.snapshotUrl,
+    // PHASE 2. Absent on a Phase 1 backend, which simply means no Revisit is offered.
+    // Only an explicit true enables a control that flies the aircraft.
+    revisitAvailable: raw.revisitAvailable === true,
+    revisitUnavailableReason:
+      typeof raw.revisitUnavailableReason === 'string' && raw.revisitUnavailableReason !== ''
+        ? raw.revisitUnavailableReason
+        : null,
   };
 }
 

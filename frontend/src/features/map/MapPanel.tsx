@@ -3,6 +3,7 @@ import { Panel } from '../../components/Panel';
 import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import { editMode, localIssue, type PlanningAction, type PlanningState } from '../planning/planningState';
+import type { RevisitPolicy } from './detectionMarkerLayer';
 import type { DronePose } from './headingIndicator';
 import { MapView, type MapFocus } from './MapView';
 
@@ -14,6 +15,10 @@ interface Props {
   detections: DetectionCandidate[];
   focus: MapFocus | null;
   onSelectDetection: (candidateId: string) => void;
+  /** PHASE 2. Mission-side permission for the popup's Revisit action. */
+  revisitPolicy: RevisitPolicy;
+  /** PHASE 2. Receives a candidate id only; never a coordinate. */
+  onRevisitDetection: (candidateId: string) => void;
 }
 
 function hint(planning: PlanningState): string | null {
@@ -33,6 +38,7 @@ function hint(planning: PlanningState): string | null {
 
 export function MapPanel({
   planning, dispatch, route, drone, detections, focus, onSelectDetection,
+  revisitPolicy, onRevisitDetection,
 }: Props) {
   const [centerRequest, setCenterRequest] = useState(0);
   const mode = editMode(planning);
@@ -66,6 +72,8 @@ export function MapPanel({
           centerOnDroneRequest={centerRequest}
           focus={focus}
           onSelectDetection={onSelectDetection}
+          revisitPolicy={revisitPolicy}
+          onRevisitDetection={onRevisitDetection}
           onAddVertex={(point) => dispatch({ type: 'ADD_VERTEX', point })}
           onClose={() => dispatch({ type: 'CLOSE_POLYGON' })}
           onMoveVertex={(index, point) => dispatch({ type: 'MOVE_VERTEX', index, point })}

@@ -1,4 +1,4 @@
-import type { Dispatch } from 'react';
+import type { Dispatch, ReactNode } from 'react';
 import type { MissionUpdateData } from '../../types/mission';
 import { operatorMessage } from '../planning/planErrorCopy';
 import {
@@ -10,7 +10,10 @@ import {
   type PlanningAction,
   type PlanningState,
 } from '../planning/planningState';
+import { ManualFlightLegend } from './ManualFlightLegend';
+import type { ActionState, MissionActions } from './missionActions';
 import { MISSION_STATE_COPY, isLive, missionErrorMessage } from './missionCopy';
+import type { ManualFlightState } from './useManualFlightInput';
 import type { MissionCommands } from './useMissionCommands';
 
 interface Props {
@@ -21,6 +24,10 @@ interface Props {
   mission: MissionUpdateData | null;
   commands: MissionCommands;
   onStartNewSearch: () => void;
+  /** PHASE 2. Precomputed availability; see missionActions. */
+  actions: MissionActions;
+  /** PHASE 2. Keyboard flight state, for the legend. */
+  manual: ManualFlightState;
 }
 
 const ISSUE_COPY = {
@@ -31,11 +38,61 @@ const ISSUE_COPY = {
 } as const;
 
 /**
+ * One button in the live action row.
+ *
+ * An action the backend will not accept is rendered disabled with its reason rather
+ * than hidden. Hiding it would make the row jump around as the activity changes and
+ * leave the operator guessing why something they used a moment ago is gone.
+ */
+function ActionButton({
+  state,
+  label,
+  busyLabel,
+  busy,
+  anyPending,
+  primary,
+  onClick,
+}: {
+  state: ActionState;
+  label: string;
+  busyLabel: string;
+  busy: boolean;
+  anyPending: boolean;
+  primary?: boolean;
+  onClick: () => void;
+}): ReactNode {
+  const disabled = !state.available || anyPending;
+  return (
+    <button
+      type="button"
+      className={primary ? 'btn btn--primary' : 'btn'}
+      disabled={disabled}
+      aria-busy={busy}
+      // The reason has to reach a screen reader too, not just a mouse hover.
+      title={state.reason ?? undefined}
+      aria-description={state.reason ?? undefined}
+      onClick={onClick}
+    >
+      {busy ? busyLabel : label}
+    </button>
+  );
+}
+
+/**
  * Controls derive from mission phase + edit mode, not from independent booleans.
  * Once the backend reports a live execution it takes over: the backend owns mission
  * state, so the buttons follow missionState rather than anything computed here.
  */
-export function MissionControls({ planning, dispatch, onGenerate, mission, commands, onStartNewSearch }: Props) {
+export function MissionControls({
+  planning,
+  dispatch,
+  onGenerate,
+  mission,
+  commands,
+  onStartNewSearch,
+  actions,
+  manual,
+}: Props) {
   const mode = editMode(planning);
   const { vertices } = planning.searchArea;
   const issue = localIssue(planning);
@@ -49,48 +106,82 @@ export function MissionControls({ planning, dispatch, onGenerate, mission, comma
 
   if (mission && isLive(mission.missionState)) {
     const id = mission.executionId;
-    const copy = MISSION_STATE_COPY[mission.missionState];
-    note = copy.detail;
+    note = actions.detail;
 
     const stopButton = (
-      <button
-        type="button"
-        className="btn"
-        disabled={busy !== null}
-        aria-busy={busy === 'stop'}
+      <ActionButton
+        state={actions.stop}
+        label="Stop and return home"
+        busyLabel="Returning home…"
+        busy={busy === 'stop'}
+        anyPending={busy !== null}
         onClick={() => commands.stop(id)}
-      >
-        {busy === 'stop' ? 'Returning home…' : 'Stop and return home'}
-      </button>
+      />
     );
 
-    if (mission.missionState === 'RUNNING') {
-      buttons = (
-        <>
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={busy !== null}
-            aria-busy={busy === 'pause'}
+    // Take and Give share one slot, always first, so the control that changes who is
+    // flying the aircraft never moves out from under the operator's cursor.
+    const handoverButton = actions.manualActive ? (
+      <ActionButton
+        state={actions.giveControls}
+        label="Give controls"
+        busyLabel="Handing back…"
+        busy={busy === 'give-controls'}
+        anyPending={busy !== null}
+        onClick={() => commands.giveControls(id)}
+      />
+    ) : (
+      <ActionButton
+        state={actions.takeControls}
+        label="Take controls"
+        busyLabel="Taking controls…"
+        busy={busy === 'take-controls'}
+        anyPending={busy !== null}
+        onClick={() => commands.takeControls(id)}
+      />
+    );
+
+    if (mission.missionState === 'RUNNING' || mission.missionState === 'PAUSED') {
+      const resumeOrPause =
+        mission.missionState === 'RUNNING' ? (
+          <ActionButton
+            state={actions.pause}
+            label="Pause"
+            busyLabel="Pausing…"
+            busy={busy === 'pause'}
+            anyPending={busy !== null}
+            primary
             onClick={() => commands.pause(id)}
-          >
-            {busy === 'pause' ? 'Pausing…' : 'Pause'}
-          </button>
-          {stopButton}
-        </>
-      );
-    } else if (mission.missionState === 'PAUSED') {
+          />
+        ) : (
+          <ActionButton
+            state={actions.resumeSearch}
+            label="Resume search"
+            busyLabel="Resuming…"
+            busy={busy === 'resume'}
+            anyPending={busy !== null}
+            primary
+            onClick={() => commands.resume(id)}
+          />
+        );
+
+      const revisitInProgress =
+        mission.flightActivity === 'REVISITING' || mission.activeRevisitCandidateId !== null;
+
       buttons = (
         <>
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={busy !== null}
-            aria-busy={busy === 'resume'}
-            onClick={() => commands.resume(id)}
-          >
-            {busy === 'resume' ? 'Resuming…' : 'Resume search'}
-          </button>
+          {handoverButton}
+          {resumeOrPause}
+          {revisitInProgress && (
+            <ActionButton
+              state={actions.cancelRevisit}
+              label="Cancel revisit"
+              busyLabel="Cancelling…"
+              busy={busy === 'cancel-revisit'}
+              anyPending={busy !== null}
+              onClick={() => commands.cancelRevisit(id)}
+            />
+          )}
           {stopButton}
         </>
       );
@@ -206,6 +297,16 @@ export function MissionControls({ planning, dispatch, onGenerate, mission, comma
         {buttons}
         {note && <p className="controls__hint">{note}</p>}
       </div>
+      {/* Only while the backend says the aircraft is under manual control, so the
+          legend is never on screen when the keys would do nothing. */}
+      {actions.manualActive && (
+        <ManualFlightLegend
+          held={manual.held}
+          axes={manual.axes}
+          capturing={manual.capturing}
+          unavailableReason={manual.unavailableReason}
+        />
+      )}
       {error && (
         <div className="controls__error" role="alert">
           <div>

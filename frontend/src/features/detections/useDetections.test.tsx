@@ -19,6 +19,8 @@ function candidate(overrides: Partial<DetectionCandidate> = {}): DetectionCandid
     },
     estimatedLocation: null,
     snapshotUrl: '/api/detections/cand-1/snapshot',
+    revisitAvailable: false,
+    revisitUnavailableReason: null,
     ...overrides,
   };
 }
