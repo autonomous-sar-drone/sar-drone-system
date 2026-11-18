@@ -14,6 +14,9 @@ from app.domain.models.telemetry import TelemetrySample
 from app.domain.models.vehicle_status import VehicleStatus
 from app.geospatial.distance import geodesic_distance_m
 from app.geospatial.terrain_grid import TerrainGrid
+from app.geospatial.terrain_relocation import (
+    RouteDepartureAnchor, plan_terrain_relocation_chain,
+)
 from app.geospatial.terrain_navigation import (
     NavigationCommand, LookaheadTarget, build_safe_transit,
     build_terrain_navigation, terrain_lookahead_target,
@@ -100,6 +103,8 @@ class MissionService:
         self._recovery_commands: tuple[Waypoint, ...] = ()
         self._recovery_index = 0
         self._preserve_resume_anchor = False
+        self._route_departure_anchor: RouteDepartureAnchor | None = None
+        self._recovery_climb_target: Waypoint | None = None
 
         self._target_reached_tolerance_m = target_reached_tolerance_m
         self._target_altitude_tolerance_m = target_altitude_tolerance_m
@@ -270,6 +275,8 @@ class MissionService:
             self._recovery_commands = ()
             self._recovery_index = 0
             self._preserve_resume_anchor = False
+            self._route_departure_anchor = None
+            self._recovery_climb_target = None
 
             execution = MissionExecution(
                 execution_id=str(uuid4()),
@@ -347,6 +354,39 @@ class MissionService:
 
             return execution
 
+    async def capture_route_departure_anchor(self, execution_id: str) -> RouteDepartureAnchor:
+        """Capture the original search departure before a future manual/revisit takeover.
+
+        This records navigation intent only; it does not transfer vehicle control.
+        The eventual manual authority handler must call this under its own
+        confirmed takeover flow, never in response to a browser position.
+        """
+        async with self._action_lock:
+            execution = self._require_current_execution(execution_id)
+            if self._terrain_grid is None or execution.state != MissionState.RUNNING:
+                self._raise_action_not_allowed("capture_route_departure_anchor")
+            if self._route_departure_anchor is not None:
+                return self._route_departure_anchor
+            # A newly recorded departure must be on the search path, not on
+            # a Stop/Continue or another relocation leg.
+            if self._recovery_commands:
+                self._raise_action_not_allowed("capture_route_departure_anchor")
+            if execution.active_target is None:
+                self._raise_action_not_allowed("capture_route_departure_anchor")
+            _, latest = await self._telemetry_hub.get_latest()
+            sample = self._validate_execution_telemetry(latest)
+            try:
+                self._terrain_grid.height_geo(sample.latitude_deg, sample.longitude_deg)
+            except ValueError as exc:
+                raise self._terrain_error(exc) from exc
+            self._route_departure_anchor = RouteDepartureAnchor(
+                position=Waypoint(sample.latitude_deg, sample.longitude_deg,
+                                  sample.relative_altitude_m, AltitudeReference.HOME_RELATIVE),
+                unfinished_target=execution.active_target,
+                completed_count=len(execution.completed_targets),
+            )
+            return self._route_departure_anchor
+
     async def pause(self, execution_id: str) -> MissionExecution:
         async with self._action_lock:
             execution = self._require_current_execution(execution_id)
@@ -384,37 +424,34 @@ class MissionService:
             if self._terrain_grid is not None:
                 _, latest = await self._telemetry_hub.get_latest()
                 sample = self._validate_execution_telemetry(latest)
-                previous_commands = self._recovery_commands
-                previous_index = self._recovery_index
-                previous_ends = self._recovery_segment_ends
-                pending = (previous_commands[previous_index:]
-                           if previous_commands else (self._navigation_target,))
-                if not pending or pending[0] is None:
+                if self._route_departure_anchor is not None:
+                    destinations = (self._route_departure_anchor.position,)
+                elif self._recovery_commands:
+                    destinations = tuple(self._recovery_commands[i]
+                                         for i in self._recovery_segment_ends
+                                         if i >= self._recovery_index)
+                else:
+                    destinations = (self._navigation_target,)
+                if not destinations or any(dest is None for dest in destinations):
                     self._raise_action_not_allowed("resume")
                 try:
-                    transit = build_safe_transit(
-                        self._terrain_grid, sample.latitude_deg, sample.longitude_deg,
-                        pending[0].latitude_deg, pending[0].longitude_deg,
+                    origin = Waypoint(sample.latitude_deg, sample.longitude_deg,
+                                      sample.relative_altitude_m, AltitudeReference.HOME_RELATIVE)
+                    relocation = plan_terrain_relocation_chain(
+                        self._terrain_grid, origin, destinations,
                         self._require_current_plan(execution.plan_id).planning_settings.search_altitude_m,
                         spacing_m=self._terrain_step_m,
                     )
                 except ValueError as exc:
                     raise self._terrain_error(exc) from exc
-                self._recovery_commands = tuple(transit) + tuple(pending[1:])
-                if previous_commands:
-                    shifted = tuple(len(transit) - 1 + end - previous_index
-                                    for end in previous_ends if end >= previous_index)
-                    self._recovery_segment_ends = tuple(dict.fromkeys(
-                        (len(transit) - 1,) + shifted,
-                    ))
-                else:
-                    self._recovery_segment_ends = (len(transit) - 1,)
-                self._recovery_origin = Waypoint(
-                    sample.latitude_deg, sample.longitude_deg, transit[0].altitude_m,
-                    AltitudeReference.HOME_RELATIVE,
-                )
+                self._recovery_commands = relocation.commands
+                self._recovery_segment_ends = relocation.segment_ends
+                self._recovery_origin = origin
                 self._recovery_index = 0
+                self._recovery_climb_target = relocation.climb_target
                 self._resuming_to_checkpoint = True
+                self._last_guidance_target = None
+                self._last_guidance_sent_at = None
 
             await self._call_vehicle(vehicle.set_guided())
             if self._terrain_grid is not None:
@@ -496,6 +533,7 @@ class MissionService:
         self._recovery_index = 0
         self._recovery_segment_ends = ()
         self._recovery_origin = None
+        self._recovery_climb_target = None
         self._last_guidance_target = None
         self._last_guidance_sent_at = None
         self._resuming_to_checkpoint = False
@@ -541,25 +579,36 @@ class MissionService:
                 if not self._navigation_commands or self._navigation_target is None:
                     raise self._terrain_error(ValueError("Unfinished terrain route is missing"))
                 try:
-                    to_checkpoint = build_safe_transit(
-                        self._terrain_grid, telemetry.latitude_deg, telemetry.longitude_deg,
-                        checkpoint.telemetry.latitude_deg, checkpoint.telemetry.longitude_deg,
+                    departure_altitude = self._terrain_takeoff_altitude(
+                        plan.planning_settings.search_altitude_m,
+                        telemetry, self._navigation_target,
+                    )
+                    departure = Waypoint(telemetry.latitude_deg, telemetry.longitude_deg,
+                                         departure_altitude, AltitudeReference.HOME_RELATIVE)
+                    if self._route_departure_anchor is not None:
+                        destinations = (self._route_departure_anchor.position,)
+                    else:
+                        checkpoint_ground = self._terrain_grid.height_geo(
+                            checkpoint.telemetry.latitude_deg,
+                            checkpoint.telemetry.longitude_deg,
+                        )
+                        checkpoint_target = Waypoint(
+                            checkpoint.telemetry.latitude_deg, checkpoint.telemetry.longitude_deg,
+                            max(checkpoint.telemetry.relative_altitude_m,
+                                checkpoint_ground + plan.planning_settings.search_altitude_m + 1.0),
+                            AltitudeReference.HOME_RELATIVE,
+                        )
+                        destinations = (checkpoint_target, self._navigation_target)
+                    relocation = plan_terrain_relocation_chain(
+                        self._terrain_grid, departure, destinations,
                         plan.planning_settings.search_altitude_m, self._terrain_step_m,
                     )
-                    to_search = build_safe_transit(
-                        self._terrain_grid,
-                        checkpoint.telemetry.latitude_deg, checkpoint.telemetry.longitude_deg,
-                        self._navigation_target.latitude_deg, self._navigation_target.longitude_deg,
-                        plan.planning_settings.search_altitude_m, self._terrain_step_m,
-                    )
-                    recovery_commands = to_checkpoint + to_search
-                    if len(recovery_commands) > 3000:
-                        raise ValueError("Terrain recovery path is too long")
+                    recovery_commands = relocation.commands
                 except ValueError as exc:
                     raise self._terrain_error(exc) from exc
             else:
                 recovery_commands = ()
-                to_checkpoint = ()
+                relocation = None
 
             self._set_state(MissionState.PREFLIGHT_CHECK)
             self._return_terminal_state = None
@@ -593,15 +642,14 @@ class MissionService:
                     altitude_reference=AltitudeReference.HOME_RELATIVE,
                 )
                 if recovery_commands:
-                    recovery_start = Waypoint(
-                        telemetry.latitude_deg, telemetry.longitude_deg,
-                        recovery_commands[0].altitude_m, AltitudeReference.HOME_RELATIVE,
-                    )
+                    relocation_start = departure
+                    first_segment = relocation.segment_ends[0]
                     await self._send_terrain_guidance(
                         vehicle,
                         terrain_lookahead_target(
                             self._terrain_grid, telemetry.latitude_deg, telemetry.longitude_deg,
-                            recovery_start, tuple(to_checkpoint), self._terrain_lookahead_m,
+                            relocation_start, recovery_commands[:first_segment + 1],
+                            self._terrain_lookahead_m,
                         ),
                         force=True,
                     )
@@ -617,18 +665,15 @@ class MissionService:
                 )
                 raise
 
-            execution.active_target = checkpoint_target
+            execution.active_target = (
+                self._route_departure_anchor.unfinished_target
+                if self._route_departure_anchor is not None else checkpoint_target
+            )
             self._recovery_commands = recovery_commands
             self._recovery_index = 0
-            self._recovery_segment_ends = (
-                (len(to_checkpoint) - 1, len(recovery_commands) - 1)
-                if recovery_commands else ()
-            )
-            self._recovery_origin = (
-                Waypoint(telemetry.latitude_deg, telemetry.longitude_deg,
-                         recovery_commands[0].altitude_m, AltitudeReference.HOME_RELATIVE)
-                if recovery_commands else None
-            )
+            self._recovery_segment_ends = (relocation.segment_ends if relocation else ())
+            self._recovery_origin = (departure if recovery_commands else None)
+            self._recovery_climb_target = (relocation.climb_target if relocation else None)
             self._preserve_resume_anchor = bool(recovery_commands)
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = True
@@ -944,6 +989,8 @@ class MissionService:
         self._recovery_commands = ()
         self._recovery_index = 0
         self._preserve_resume_anchor = False
+        self._route_departure_anchor = None
+        self._recovery_climb_target = None
         self._terrain_launch_origin = None
         self._recovery_origin = None
         self._recovery_segment_ends = ()
@@ -1085,7 +1132,20 @@ class MissionService:
             await self._call_vehicle(self._require_ready_vehicle().hold())
             self._set_state(MissionState.PAUSED)
             raise self._terrain_error(exc) from exc
-        if agl < plan.planning_settings.search_altitude_m - 5.0:
+        climbing_in_place = (
+            self._recovery_climb_target is not None
+            and self._recovery_commands
+            and self._recovery_segment_ends
+            and self._recovery_index <= self._recovery_segment_ends[0]
+            and self._recovery_origin is not None
+            and geodesic_distance_m(
+                GeoPoint(sample.latitude_deg, sample.longitude_deg),
+                GeoPoint(self._recovery_origin.latitude_deg,
+                         self._recovery_origin.longitude_deg),
+            ) <= 1.5
+            and agl >= 5.0
+        )
+        if agl < plan.planning_settings.search_altitude_m - 5.0 and not climbing_in_place:
             await self._call_vehicle(self._require_ready_vehicle().hold())
             self._set_state(MissionState.PAUSED)
             raise MissionExecutionError(
@@ -1105,6 +1165,8 @@ class MissionService:
                     return
                 remaining = tuple(i for i in self._recovery_segment_ends if i > end)
                 if remaining:
+                    if self._recovery_climb_target is not None and end == self._recovery_segment_ends[0]:
+                        self._recovery_climb_target = None
                     self._recovery_index = end + 1
                     self._last_guidance_target = None
                     self._last_guidance_sent_at = None
@@ -1117,6 +1179,9 @@ class MissionService:
                     self._recovery_origin = None
                     self._resuming_to_checkpoint = False
                     self._preserve_resume_anchor = False
+                    self._recovery_climb_target = None
+                    if self._route_departure_anchor is not None:
+                        self._route_departure_anchor = None
                     if self._navigation_target is None:
                         raise ValueError("Unfinished search target missing")
                     self._last_guidance_target = None
