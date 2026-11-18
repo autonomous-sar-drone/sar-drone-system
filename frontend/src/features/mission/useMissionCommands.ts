@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  cancelRevisit,
   commenceMission,
   continueMission,
+  giveControls,
   pauseMission,
   resumeMission,
+  revisitDetection,
   stopMission,
+  takeControls,
 } from '../../api/missionsClient';
 import type { MissionCommand, MissionError, MissionExecution } from '../../types/mission';
 
@@ -23,6 +27,14 @@ export interface MissionCommands {
   resume: (executionId: string) => Promise<void>;
   stop: (executionId: string) => Promise<void>;
   resumeInterrupted: (executionId: string) => Promise<void>;
+  /** PHASE 2. Request manual ownership; readiness still comes from the backend. */
+  takeControls: (executionId: string) => Promise<void>;
+  /** PHASE 2. Hand control back to a neutral hold. */
+  giveControls: (executionId: string) => Promise<void>;
+  /** PHASE 2. Fly to one candidate's stored capture viewpoint, by id only. */
+  revisit: (executionId: string, candidateId: string) => Promise<void>;
+  /** PHASE 2. Stop a revisit relocation and hold. */
+  cancelRevisit: (executionId: string) => Promise<void>;
   dismissError: () => void;
 }
 
@@ -92,6 +104,27 @@ export function useMissionCommands(): MissionCommands {
     ),
     resumeInterrupted: useCallback(
       (executionId) => run('continue', (signal) => continueMission(executionId, { signal })),
+      [run],
+    ),
+    // The Phase 2 commands go through the same single-flight guard as the rest.
+    // Take and Give in particular must never overlap: two requests racing for
+    // ownership of the same aircraft is the one case where the loser's response
+    // could leave the console showing the wrong side of a handover.
+    takeControls: useCallback(
+      (executionId) => run('take-controls', (signal) => takeControls(executionId, { signal })),
+      [run],
+    ),
+    giveControls: useCallback(
+      (executionId) => run('give-controls', (signal) => giveControls(executionId, { signal })),
+      [run],
+    ),
+    revisit: useCallback(
+      (executionId, candidateId) =>
+        run('revisit', (signal) => revisitDetection(executionId, candidateId, { signal })),
+      [run],
+    ),
+    cancelRevisit: useCallback(
+      (executionId) => run('cancel-revisit', (signal) => cancelRevisit(executionId, { signal })),
       [run],
     ),
     dismissError: useCallback(() => setState(IDLE), []),

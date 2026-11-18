@@ -4,6 +4,8 @@ import { DetectionsPanel } from './features/detections/DetectionsPanel';
 import { MapPanel } from './features/map/MapPanel';
 import { MissionControls } from './features/mission/MissionControls';
 import { MissionStatusPanel } from './features/mission/MissionStatusPanel';
+import { missionActions } from './features/mission/missionActions';
+import { useManualFlightInput } from './features/mission/useManualFlightInput';
 import { useMissionCommands } from './features/mission/useMissionCommands';
 import { useDetections } from './features/detections/useDetections';
 import { usePlanning } from './features/planning/usePlanning';
@@ -50,6 +52,38 @@ export default function App() {
     }));
   }, []);
 
+  // PHASE 2. The backend identifies a revisit by id; the operator knows candidates by
+  // number, so the label needs the number from the collection we already hold.
+  const revisitNumber = useMemo(() => {
+    const id = visibleMission?.activeRevisitCandidateId;
+    if (!id) return null;
+    return detections.candidates.find((c) => c.candidateId === id)?.candidateNumber ?? null;
+  }, [visibleMission?.activeRevisitCandidateId, detections.candidates]);
+
+  const actions = useMemo(
+    () => missionActions(visibleMission, revisitNumber),
+    [visibleMission, revisitNumber],
+  );
+  const manual = useManualFlightInput(visibleMission);
+
+  const revisitPolicy = useMemo(
+    () => ({
+      missionAllows: actions.revisit.available,
+      missionReason: actions.revisit.reason,
+    }),
+    [actions.revisit.available, actions.revisit.reason],
+  );
+
+  const revisitDetection = useCallback(
+    (candidateId: string) => {
+      // Guarded here as well as in the popup: permission can lapse between the popup
+      // being drawn and the click landing.
+      if (!visibleMission || !actions.revisit.available) return;
+      void commands.revisit(visibleMission.executionId, candidateId);
+    },
+    [visibleMission, actions.revisit.available, commands],
+  );
+
   const lat = reading?.data.latitudeDeg;
   const lon = reading?.data.longitudeDeg;
   const heading = reading?.data.headingDeg ?? null;
@@ -76,9 +110,15 @@ export default function App() {
           detections={detections.candidates}
           focus={mapFocus}
           onSelectDetection={detections.select}
+          revisitPolicy={revisitPolicy}
+          onRevisitDetection={revisitDetection}
         />
         <TelemetryPanel reading={reading} status={status} nowMs={nowMs} />
-        <MissionStatusPanel planning={planning} mission={visibleMission} />
+        <MissionStatusPanel
+          planning={planning}
+          mission={visibleMission}
+          revisitNumber={revisitNumber}
+        />
         <DroneViewPanel vision={vision} mission={visibleMission} />
         <DetectionsPanel detections={detections} nowMs={nowMs} onShowOnMap={showOnMap} />
         <MissionControls
@@ -88,6 +128,8 @@ export default function App() {
           mission={visibleMission}
           onStartNewSearch={startNewSearch}
           commands={commands}
+          actions={actions}
+          manual={manual}
         />
       </main>
     </>

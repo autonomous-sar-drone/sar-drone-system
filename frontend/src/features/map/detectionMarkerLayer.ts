@@ -94,12 +94,76 @@ export function updateMarkerElement(el: HTMLElement, model: MarkerModel): void {
 }
 
 /**
- * Read-only preview. No Confirm or Dismiss here: reviewing from a hover popup is
- * too easy to do by accident, and the review queue is the one place a decision is
- * recorded.
+ * PHASE 2. Whether this sighting can be revisited right now, and why not if it
+ * cannot. Two independent gates, and the backend owns both of them.
  */
-/** Read-only, compact preview. Coordinates refer to the historical person estimate. */
-export function createPopupElement(candidate: DetectionCandidate, nowMs: number): HTMLElement {
+export interface RevisitPolicy {
+  /** Mission side: the aircraft is in a state that accepts a revisit. */
+  missionAllows: boolean;
+  /** Shown when the mission side is what blocks it. */
+  missionReason: string | null;
+}
+
+export const REVISIT_CLOSED: RevisitPolicy = {
+  missionAllows: false,
+  missionReason: 'Not available right now.',
+};
+
+export interface RevisitEligibility {
+  /** Whether to render the control at all. Dismissed sightings get nothing. */
+  offered: boolean;
+  enabled: boolean;
+  reason: string | null;
+}
+
+/**
+ * Revisit is offered for pending and confirmed sightings only.
+ *
+ * A dismissed sighting is one the operator has already ruled out, and it carries no
+ * marker either, so offering to fly back to it would be reviving a decision they
+ * made. Everything else is the backend's call: revisitAvailable means it holds a
+ * usable capture pose, and missionAllows means the aircraft can act on it.
+ */
+export function revisitEligibility(
+  candidate: DetectionCandidate,
+  policy: RevisitPolicy,
+): RevisitEligibility {
+  if (candidate.status === 'DISMISSED') {
+    return { offered: false, enabled: false, reason: null };
+  }
+  if (!candidate.revisitAvailable) {
+    return {
+      offered: true,
+      enabled: false,
+      reason: candidate.revisitUnavailableReason ?? 'No stored viewpoint for this sighting.',
+    };
+  }
+  if (!policy.missionAllows) {
+    return { offered: true, enabled: false, reason: policy.missionReason ?? 'Not available right now.' };
+  }
+  return { offered: true, enabled: true, reason: null };
+}
+
+export interface PopupActions {
+  policy: RevisitPolicy;
+  /** Called with the candidate id only. Never with a coordinate. */
+  onRevisit?: (candidateId: string) => void;
+}
+
+/**
+ * Read-only preview plus, in Phase 2, a single navigation action. Still no Confirm
+ * or Dismiss here: reviewing from a hover popup is too easy to do by accident, and
+ * the review queue is the one place a decision is recorded.
+ *
+ * Coordinates shown refer to the historical person estimate. The Revisit action does
+ * NOT use them: it sends the candidate id and lets the backend fly to the stored
+ * camera pose.
+ */
+export function createPopupElement(
+  candidate: DetectionCandidate,
+  nowMs: number,
+  actions?: PopupActions,
+): HTMLElement {
   const root = document.createElement('div');
   root.className = 'detect-popup';
 
@@ -162,6 +226,47 @@ export function createPopupElement(candidate: DetectionCandidate, nowMs: number)
   }
 
   details.append(heading, meta, coordinates, quality);
+
+  // PHASE 2. Appended last so the snapshot, number, confidence, time and estimated
+  // position above are untouched by it.
+  if (actions !== undefined) {
+    const eligibility = revisitEligibility(candidate, actions.policy);
+    if (eligibility.offered) {
+      const row = document.createElement('div');
+      row.className = 'detect-popup__actions';
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn--small';
+      button.dataset.revisit = candidate.candidateId;
+      button.textContent = 'Revisit viewpoint';
+      button.disabled = !eligibility.enabled;
+      if (eligibility.reason !== null) {
+        button.title = eligibility.reason;
+        button.setAttribute('aria-description', eligibility.reason);
+      }
+      button.addEventListener('click', (event) => {
+        // The map is underneath. Without this, a click here would also drop a
+        // polygon vertex, select the marker, or start a drag.
+        event.stopPropagation();
+        event.preventDefault();
+        if (!eligibility.enabled) return;
+        // Id only. The destination is the backend's stored capture pose, not the
+        // estimated person location this popup is displaying.
+        actions.onRevisit?.(candidate.candidateId);
+      });
+      row.appendChild(button);
+
+      if (eligibility.reason !== null) {
+        const reason = document.createElement('p');
+        reason.className = 'detect-popup__reason';
+        reason.textContent = eligibility.reason;
+        row.appendChild(reason);
+      }
+      details.appendChild(row);
+    }
+  }
+
   root.append(image, details);
   return root;
 }
@@ -169,8 +274,16 @@ export function createPopupElement(candidate: DetectionCandidate, nowMs: number)
 interface Options {
   /** Selecting from the map moves the review queue; it never records a decision. */
   onSelect?: (candidateId: string) => void;
+  /** PHASE 2. Receives a candidate id only; never a coordinate. */
+  onRevisit?: (candidateId: string) => void;
   /** Read at hover time so the popup shows a current relative time. */
   now?: () => number;
+  /**
+   * How long the popup survives after the pointer leaves both the marker and the
+   * popup. There is a real gap between them, so closing on the first mouseleave
+   * would make the Revisit button unreachable with a mouse.
+   */
+  graceMs?: number;
 }
 
 interface Entry {
@@ -180,17 +293,46 @@ interface Entry {
   model: MarkerModel;
   candidate: DetectionCandidate;
   listeners: Array<[string, EventListener]>;
+  /** Latest popup content, so listeners and focus moves can find it. */
+  content: HTMLElement | null;
+  pointerOverMarker: boolean;
+  pointerOverPopup: boolean;
+  focusWithin: boolean;
+  closeTimer: ReturnType<typeof setTimeout> | null;
 }
+
+const DEFAULT_GRACE_MS = 240;
 
 /** Keeps live MapLibre markers in step with the candidate collection. */
 export class DetectionMarkerLayer {
   private entries = new Map<string, Entry>();
   private readonly map: maplibregl.Map;
   private readonly options: Options;
+  private readonly graceMs: number;
+  private policy: RevisitPolicy = REVISIT_CLOSED;
 
   constructor(map: maplibregl.Map, options: Options = {}) {
     this.map = map;
     this.options = options;
+    this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
+  }
+
+  /**
+   * PHASE 2. Mission-side revisit permission, which changes independently of the
+   * candidates. Any popup already on screen is re-rendered so an action cannot stay
+   * clickable after the aircraft stopped being able to accept it.
+   */
+  setRevisitPolicy(policy: RevisitPolicy): void {
+    if (
+      this.policy.missionAllows === policy.missionAllows &&
+      this.policy.missionReason === policy.missionReason
+    ) {
+      return;
+    }
+    this.policy = policy;
+    for (const entry of this.entries.values()) {
+      if (entry.content !== null) this.renderPopup(entry);
+    }
   }
 
   sync(candidates: DetectionCandidate[]): void {
@@ -224,13 +366,81 @@ export class DetectionMarkerLayer {
       }
       existing.model = model;
       existing.candidate = candidate;
-      existing.popup.setDOMContent(this.popupFor(candidate));
+      if (existing.content !== null) this.renderPopup(existing);
     }
   }
 
-  private popupFor(candidate: DetectionCandidate): HTMLElement {
+  /** Build the popup content, wire its listeners, and hand it to MapLibre. */
+  private renderPopup(entry: Entry): void {
     const now = this.options.now?.() ?? Date.now();
-    return createPopupElement(candidate, now);
+    const content = createPopupElement(entry.candidate, now, {
+      policy: this.policy,
+      onRevisit: (candidateId) => this.options.onRevisit?.(candidateId),
+    });
+
+    // The popup floats above the map canvas, so anything that starts here must be
+    // stopped here or the map will also act on it.
+    content.addEventListener('mousedown', (event) => event.stopPropagation());
+    content.addEventListener('click', (event) => event.stopPropagation());
+
+    content.addEventListener('mouseenter', () => {
+      entry.pointerOverPopup = true;
+      this.cancelClose(entry);
+    });
+    content.addEventListener('mouseleave', () => {
+      entry.pointerOverPopup = false;
+      this.scheduleClose(entry);
+    });
+    content.addEventListener('focusin', () => {
+      entry.focusWithin = true;
+      this.cancelClose(entry);
+    });
+    content.addEventListener('focusout', (event) => {
+      const next = (event as FocusEvent).relatedTarget;
+      // Moving between controls inside the popup, or back onto the marker, is not
+      // leaving: only a destination outside both counts.
+      if (next instanceof Node && (content.contains(next) || entry.element.contains(next))) return;
+      entry.focusWithin = false;
+      this.scheduleClose(entry);
+    });
+    content.addEventListener('keydown', (event) => {
+      if ((event as KeyboardEvent).key !== 'Escape') return;
+      event.stopPropagation();
+      // Focus goes back to the marker rather than nowhere, so Escape does not strand
+      // a keyboard operator at the top of the document.
+      entry.focusWithin = false;
+      entry.element.focus();
+      this.closeNow(entry);
+    });
+
+    entry.content = content;
+    entry.popup.setDOMContent(content);
+  }
+
+  private openPopup(entry: Entry): void {
+    this.cancelClose(entry);
+    this.renderPopup(entry);
+    entry.popup.setLngLat(entry.model.lngLat).addTo(this.map);
+  }
+
+  private scheduleClose(entry: Entry): void {
+    this.cancelClose(entry);
+    entry.closeTimer = setTimeout(() => {
+      entry.closeTimer = null;
+      if (entry.pointerOverMarker || entry.pointerOverPopup || entry.focusWithin) return;
+      this.closeNow(entry);
+    }, this.graceMs);
+  }
+
+  private cancelClose(entry: Entry): void {
+    if (entry.closeTimer !== null) clearTimeout(entry.closeTimer);
+    entry.closeTimer = null;
+  }
+
+  private closeNow(entry: Entry): void {
+    this.cancelClose(entry);
+    entry.content = null;
+    entry.popup.remove();
   }
 
   private addEntry(model: MarkerModel, candidate: DetectionCandidate): Entry {
@@ -245,12 +455,40 @@ export class DetectionMarkerLayer {
     const marker = new maplibregl.Marker({ element }).setLngLat(model.lngLat).addTo(this.map);
 
     const listeners: Array<[string, EventListener]> = [];
-    const entry: Entry = { marker, popup, element, model, candidate, listeners };
-    const open = () => {
-      popup.setDOMContent(this.popupFor(entry.candidate));
-      popup.setLngLat(entry.model.lngLat).addTo(this.map);
+    const entry: Entry = {
+      marker,
+      popup,
+      element,
+      model,
+      candidate,
+      listeners,
+      content: null,
+      pointerOverMarker: false,
+      pointerOverPopup: false,
+      focusWithin: false,
+      closeTimer: null,
     };
-    const close = () => popup.remove();
+
+    const pointerEnter = () => {
+      entry.pointerOverMarker = true;
+      this.openPopup(entry);
+    };
+    const pointerLeave = () => {
+      entry.pointerOverMarker = false;
+      // Grace period, not an immediate close: the pointer has to cross a gap to
+      // reach the popup, and closing on the way would make Revisit unclickable.
+      this.scheduleClose(entry);
+    };
+    const gainFocus = () => {
+      entry.focusWithin = true;
+      this.openPopup(entry);
+    };
+    const loseFocus = (event: Event) => {
+      const next = (event as FocusEvent).relatedTarget;
+      if (next instanceof Node && entry.content?.contains(next)) return;
+      entry.focusWithin = false;
+      this.scheduleClose(entry);
+    };
     const select = (event: Event) => {
       // Without this a click would fall through to the map and drop a polygon
       // vertex under the marker while the operator is still drawing.
@@ -258,13 +496,34 @@ export class DetectionMarkerLayer {
       event.preventDefault();
       this.options.onSelect?.(entry.model.candidateId);
     };
+    const keys = (event: Event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key === 'Escape') {
+        event.stopPropagation();
+        this.closeNow(entry);
+        return;
+      }
+      // The popup is a sibling of the marker in the DOM, not a child, so natural Tab
+      // order does not reach it. ArrowDown and Tab both step into it, which is what
+      // makes Revisit usable without a mouse.
+      if (key !== 'ArrowDown' && key !== 'Tab') return;
+      if ((event as KeyboardEvent).shiftKey) return;
+      const action = entry.content?.querySelector<HTMLButtonElement>('[data-revisit]');
+      if (!action || action.disabled) return;
+      event.preventDefault();
+      event.stopPropagation();
+      entry.focusWithin = true;
+      this.cancelClose(entry);
+      action.focus();
+    };
 
     for (const [type, handler] of [
-      ['mouseenter', open],
-      ['focus', open],
-      ['mouseleave', close],
-      ['blur', close],
+      ['mouseenter', pointerEnter],
+      ['mouseleave', pointerLeave],
+      ['focus', gainFocus],
+      ['blur', loseFocus],
       ['click', select],
+      ['keydown', keys],
     ] as Array<[string, EventListener]>) {
       element.addEventListener(type, handler);
       listeners.push([type, handler]);
@@ -274,9 +533,13 @@ export class DetectionMarkerLayer {
   }
 
   private removeEntry(entry: Entry): void {
+    // Timer first: a pending close firing against a removed popup is harmless but a
+    // leaked interval across a map teardown is not.
+    this.cancelClose(entry);
     for (const [type, handler] of entry.listeners) {
       entry.element.removeEventListener(type, handler);
     }
+    entry.content = null;
     entry.popup.remove();
     entry.marker.remove();
   }

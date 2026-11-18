@@ -26,6 +26,10 @@ function mission(missionState: MissionState, extra: Partial<MissionUpdateData> =
     activeTarget: null,
     interruptionReason: null,
     runtimeError: null,
+    flightActivity: null,
+    holdReason: null,
+    activeRevisitCandidateId: null,
+    manualControlReady: false,
     timestamp: '2026-11-07T15:00:00.000Z',
     ...extra,
   };

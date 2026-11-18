@@ -69,6 +69,23 @@ export interface DetectionCandidate {
   estimatedLocation: EstimatedPersonLocation | null;
   /** Backend path for the frozen evidence snapshot. */
   snapshotUrl: string;
+  /**
+   * PHASE 2 (PROPOSED CONTRACT, awaiting backend sign-off).
+   *
+   * Whether the backend holds a usable historical drone/camera capture viewpoint for
+   * this candidate and will accept a Revisit right now. Backend-owned: the console
+   * never works this out from the marker, because the thing worth flying back to is
+   * where the CAMERA was, not where the person was estimated to be.
+   *
+   * Defaults to false when absent, so a Phase 1 backend simply offers no Revisit.
+   */
+  revisitAvailable: boolean;
+  /**
+   * PHASE 2. Optional backend explanation shown on the disabled control, e.g. the
+   * capture pose is missing or the vehicle cannot accept a Revisit. Null when the
+   * backend gives no reason.
+   */
+  revisitUnavailableReason: string | null;
 }
 
 /** GET /api/detections */

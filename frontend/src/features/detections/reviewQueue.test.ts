@@ -24,6 +24,8 @@ function candidate(candidateNumber: number, status: CandidateStatus = 'PENDING')
     },
     estimatedLocation: null,
     snapshotUrl: `/api/detections/cand-${candidateNumber}/snapshot`,
+    revisitAvailable: false,
+    revisitUnavailableReason: null,
     ...{},
   };
 }

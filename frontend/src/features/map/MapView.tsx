@@ -10,7 +10,7 @@ import type { DetectionCandidate } from '../../types/detections';
 import type { Route } from '../../types/routes';
 import type { EditMode } from '../planning/planningState';
 import { canAppendVertex, canClose, type LatLon } from '../searchArea/geometry';
-import { DetectionMarkerLayer } from './detectionMarkerLayer';
+import { DetectionMarkerLayer, REVISIT_CLOSED, type RevisitPolicy } from './detectionMarkerLayer';
 import { headingSegment, type DronePose } from './headingIndicator';
 import { INITIAL_ZOOM, MAP_COLORS, SNAP_PX, initialCenter, mapStyle } from './mapConfig';
 
@@ -28,6 +28,10 @@ export interface MapViewProps {
   detections: DetectionCandidate[];
   /** Selecting a marker moves the review queue; it never records a decision. */
   onSelectDetection?: (candidateId: string) => void;
+  /** PHASE 2. Mission-side permission for the popup's Revisit action. */
+  revisitPolicy?: RevisitPolicy;
+  /** PHASE 2. Receives a candidate id only; never a coordinate. */
+  onRevisitDetection?: (candidateId: string) => void;
   /** Bump to re-center on the drone. */
   centerOnDroneRequest: number;
   /** Where "Show on map" asked to centre. nonce changes even for the same point. */
@@ -321,7 +325,7 @@ export function MapView(props: MapViewProps) {
     };
   }, []);
 
-  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest, focus } =
+  const { vertices, closed, mode, selectedIndex, shapeInvalid, route, drone, detections, centerOnDroneRequest, focus, revisitPolicy } =
     props;
 
   // Search-area polygon (closed) or polyline (still drawing).
@@ -404,8 +408,10 @@ export function MapView(props: MapViewProps) {
     if (!map || !ready) return;
     const layer = new DetectionMarkerLayer(map, {
       onSelect: (candidateId) => propsRef.current.onSelectDetection?.(candidateId),
+      onRevisit: (candidateId) => propsRef.current.onRevisitDetection?.(candidateId),
     });
     markerLayer.current = layer;
+    layer.setRevisitPolicy(propsRef.current.revisitPolicy ?? REVISIT_CLOSED);
     layer.sync(propsRef.current.detections);
     return () => {
       layer.destroy();
@@ -416,6 +422,17 @@ export function MapView(props: MapViewProps) {
   useEffect(() => {
     markerLayer.current?.sync(detections);
   }, [detections]);
+
+  // Mission permission changes on its own schedule, so it is pushed separately
+  // rather than waiting for the next candidate update.
+  const revisitAllows = revisitPolicy?.missionAllows ?? false;
+  const revisitReason = revisitPolicy?.missionReason ?? null;
+  useEffect(() => {
+    markerLayer.current?.setRevisitPolicy({
+      missionAllows: revisitAllows,
+      missionReason: revisitReason,
+    });
+  }, [revisitAllows, revisitReason]);
 
   // "Show on map": centre on a candidate without changing anything about it.
   const focusNonce = focus?.nonce ?? 0;

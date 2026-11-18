@@ -50,6 +50,43 @@ export const INTERRUPTION_REASONS: readonly InterruptionReason[] = [
   'OPERATOR_STOP',
 ] as const;
 
+/**
+ * PHASE 2 (PROPOSED CONTRACT, awaiting backend sign-off).
+ *
+ * What the aircraft is doing *within* a mission state, as opposed to the lifecycle
+ * state itself. Deliberately a separate server-owned field rather than extra
+ * MissionState members: PAUSED still means paused whether the operator is flying by
+ * hand, holding at a viewpoint, or rejoining the route, and widening MissionState
+ * would break every existing consumer of it.
+ *
+ * Null when the backend has not sent one, which is how a Phase 1 backend reads.
+ */
+export type FlightActivity =
+  | 'SEARCHING'
+  | 'HOLDING'
+  | 'MANUAL_CONTROL'
+  | 'PREPARING_REJOIN'
+  | 'REJOINING'
+  | 'REVISITING';
+
+export const FLIGHT_ACTIVITIES: readonly FlightActivity[] = [
+  'SEARCHING',
+  'HOLDING',
+  'MANUAL_CONTROL',
+  'PREPARING_REJOIN',
+  'REJOINING',
+  'REVISITING',
+] as const;
+
+/** PHASE 2. Why the aircraft is holding, when it is. Null when it is not holding. */
+export type HoldReason = 'OPERATOR_PAUSE' | 'MANUAL_RELEASE' | 'REVISIT_ARRIVAL';
+
+export const HOLD_REASONS: readonly HoldReason[] = [
+  'OPERATOR_PAUSE',
+  'MANUAL_RELEASE',
+  'REVISIT_ARRIVAL',
+] as const;
+
 /** Body of every /api/missions/* response. */
 export interface MissionExecution {
   executionId: string;
@@ -63,6 +100,22 @@ export interface MissionExecution {
    * must never substitute a guess for it.
    */
   interruptionReason: InterruptionReason | null;
+  /**
+   * PHASE 2, server-owned. Null when the backend does not send it (Phase 1) or has
+   * no activity to report. No click may optimistically set this: takeover, holding
+   * and arrival are only ever true once the backend says so.
+   */
+  flightActivity: FlightActivity | null;
+  /** PHASE 2, server-owned. Null unless the aircraft is holding. */
+  holdReason: HoldReason | null;
+  /** PHASE 2. The candidate currently being revisited, or null. */
+  activeRevisitCandidateId: string | null;
+  /**
+   * PHASE 2. Whether the backend will accept manual input right now. Defaults to
+   * false when absent, so a Phase 1 backend disables manual flight rather than
+   * letting the console offer a control channel that does not exist.
+   */
+  manualControlReady: boolean;
 }
 
 /**
@@ -110,4 +163,14 @@ export interface MissionError {
 }
 
 /** Mission commands the operator can issue. Matches the route suffixes. */
-export type MissionCommand = 'commence' | 'pause' | 'resume' | 'stop' | 'continue';
+export type MissionCommand =
+  | 'commence'
+  | 'pause'
+  | 'resume'
+  | 'stop'
+  | 'continue'
+  /** PHASE 2 route suffixes. */
+  | 'take-controls'
+  | 'give-controls'
+  | 'revisit'
+  | 'cancel-revisit';

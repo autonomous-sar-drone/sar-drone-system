@@ -504,3 +504,92 @@
   color: var(--ink-2);
   font-size: 0.73rem;
 }
+
+/* --- PHASE 2: manual flight legend ------------------------------------- */
+
+.manual-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem 1.25rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, #fff9ef 12%, transparent);
+  border: 1px solid color-mix(in srgb, #fff9ef 24%, transparent);
+}
+
+.manual-legend__keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+}
+
+.manual-legend__row {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: #fff9ef;
+}
+
+.manual-legend__caps {
+  display: inline-flex;
+  gap: 0.1875rem;
+}
+
+.manual-legend kbd {
+  font: inherit;
+  font-weight: 600;
+  min-width: 1.5rem;
+  padding: 0.0625rem 0.3125rem;
+  text-align: center;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, #fff9ef 45%, transparent);
+  background: color-mix(in srgb, #fff9ef 10%, transparent);
+  color: #fff9ef;
+}
+
+/* Lit only while the key is actually being captured and sent, so a dead channel
+   stays visibly dead instead of echoing the operator's keypresses back at them. */
+.manual-legend kbd.is-active {
+  background: var(--sar-orange);
+  border-color: var(--sar-orange);
+  color: #fff;
+}
+
+.manual-legend__limit {
+  opacity: 0.75;
+}
+
+.manual-legend__note {
+  flex-basis: 100%;
+  font-size: 0.8125rem;
+  color: #fff9ef;
+  opacity: 0.85;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- PHASE 2: revisit action inside the detection popup ----------------- */
+
+.detect-popup__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.375rem;
+}
+
+.detect-popup__reason {
+  font-size: 0.75rem;
+  color: var(--ink-2);
+}
