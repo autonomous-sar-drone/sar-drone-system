@@ -54,6 +54,8 @@ class VehicleControl(Protocol):
 
     async def return_to_launch(self) -> None: ...
 
+    async def configure_safe_rtl(self, altitude_m: float) -> None: ...
+
 
 class MissionService:
     def __init__(
@@ -75,6 +77,7 @@ class MissionService:
         terrain_grid: TerrainGrid | None = None,
         terrain_step_m: float = 5.0,
         terrain_lookahead_m: float = 8.0,
+        rtl_home_altitude_m: float | None = None,
     ) -> None:
         self._telemetry_hub = telemetry_hub
         self._mission_hub = mission_hub
@@ -89,6 +92,7 @@ class MissionService:
         self._vehicle = vehicle
         self._terrain_grid = terrain_grid
         self._terrain_step_m = terrain_step_m
+        self._rtl_home_altitude_m = rtl_home_altitude_m
         if not 3 <= terrain_lookahead_m <= 30:
             raise ValueError("Terrain lookahead must be between 3 and 30 m")
         self._terrain_lookahead_m = terrain_lookahead_m
@@ -758,6 +762,8 @@ class MissionService:
         vehicle: VehicleControl,
         search_altitude_m: float,
     ) -> None:
+        if self._rtl_home_altitude_m is not None:
+            await self._call_vehicle(vehicle.configure_safe_rtl(self._rtl_home_altitude_m))
         await self._call_vehicle(vehicle.set_guided())
 
         # arming is only needed when the vehicle reports disarmed

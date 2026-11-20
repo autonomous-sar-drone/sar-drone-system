@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -62,6 +63,7 @@ class MavlinkVehicle:
 
         # ACKs arrive on the shared receiver and are routed to the waiting command
         self._pending_command_acks: dict[int, asyncio.Queue[Any]] = {}
+        self._pending_param_values: dict[str, asyncio.Queue[float]] = {}
 
         self._receive_task: asyncio.Task[None] | None = None
         self._stop_requested = False
@@ -242,6 +244,57 @@ class MavlinkVehicle:
         # RTL is confirmed by heartbeat, not just by requesting the mode
         await self._set_mode_and_wait("RTL")
 
+    async def configure_safe_rtl(self, altitude_m: float) -> None:
+        self._ensure_connected()
+        if self._armed:
+            raise VehicleCommandError("RTL parameters cannot be changed while armed")
+        if not math.isfinite(altitude_m) or altitude_m < 5.0:
+            raise ValueError("Safe RTL altitude must be at least 5 m")
+
+        # Setting the altitude first avoids a transient low-altitude RTL setting.
+        async with self._command_lock:
+            for param_name, param_value in (
+                ("RTL_ALT_M", altitude_m),
+                ("RTL_ALT_TYPE", 0.0),
+                ("RTL_CONE_SLOPE", 0.0),
+            ):
+                await self._set_parameter_and_verify(param_name, param_value)
+
+    async def _set_parameter_and_verify(self, name: str, value: float) -> None:
+        mavlink = _get_mavlink()
+        queue: asyncio.Queue[float] = asyncio.Queue()
+        self._pending_param_values[name] = queue
+        try:
+            self._connection.mav.param_set_send(
+                self._connection.target_system,
+                self._connection.target_component,
+                name.encode("ascii"),
+                float(value),
+                mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+            await self._wait_for_parameter(name, value, queue)
+            self._connection.mav.param_request_read_send(
+                self._connection.target_system,
+                self._connection.target_component,
+                name.encode("ascii"),
+                -1,
+            )
+            await self._wait_for_parameter(name, value, queue)
+        finally:
+            self._pending_param_values.pop(name, None)
+
+    async def _wait_for_parameter(
+        self, name: str, expected: float, queue: asyncio.Queue[float],
+    ) -> None:
+        try:
+            actual = await asyncio.wait_for(queue.get(), timeout=self._command_timeout_s)
+        except TimeoutError as exc:
+            raise VehicleCommandError(f"No parameter response for {name}") from exc
+        if not math.isclose(actual, expected, abs_tol=0.01, rel_tol=0):
+            raise VehicleCommandError(
+                f"{name} verification failed: expected {expected}, got {actual}"
+            )
+
     async def _receive_loop(self) -> None:
         while not self._stop_requested:
             # one runtime reader handles telemetry, heartbeats, and command ACKs
@@ -285,6 +338,10 @@ class MavlinkVehicle:
 
         if message_type == "COMMAND_ACK":
             self._handle_command_ack(message)
+            return
+
+        if message_type == "PARAM_VALUE":
+            self._handle_parameter_value(message)
 
     async def _handle_heartbeat(self, message: Any) -> None:
         mavlink = _get_mavlink()
@@ -319,6 +376,19 @@ class MavlinkVehicle:
         if queue is not None:
             # dispatch ACKs to the command waiting for this ID
             queue.put_nowait(message)
+
+    def _handle_parameter_value(self, message: Any) -> None:
+        if (
+            message.get_srcSystem() != self._connection.target_system
+            or message.get_srcComponent() != _get_mavlink().MAV_COMP_ID_AUTOPILOT1
+        ):
+            return
+        name = message.param_id
+        if isinstance(name, bytes):
+            name = name.decode("ascii", errors="replace")
+        queue = self._pending_param_values.get(name.rstrip("\0"))
+        if queue is not None:
+            queue.put_nowait(float(message.param_value))
 
     async def _request_global_position_interval(
         self,

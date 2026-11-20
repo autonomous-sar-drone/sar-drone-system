@@ -78,3 +78,8 @@ SAR_TERRAIN_WAYPOINT_SPACING_M: float = float(
 )
 
 SAR_TERRAIN_LOOKAHEAD_M: float = float(os.getenv("SAR_TERRAIN_LOOKAHEAD_M", "8.0"))
+
+# Keep native RTL home-relative until independent low-altitude terrain data is reliable.
+SAR_RTL_MIN_HOME_ALTITUDE_M: float = float(os.getenv("SAR_RTL_MIN_HOME_ALTITUDE_M", "50.0"))
+SAR_RTL_MIN_CLEARANCE_M: float = float(os.getenv("SAR_RTL_MIN_CLEARANCE_M", "20.0"))
+SAR_RTL_TERRAIN_MARGIN_M: float = float(os.getenv("SAR_RTL_TERRAIN_MARGIN_M", "5.0"))
