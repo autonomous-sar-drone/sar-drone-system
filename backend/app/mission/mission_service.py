@@ -1,13 +1,14 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from app.domain.models.mission_execution import MissionExecution, ResumeCheckpoint, InterruptionReason
 from app.domain.models.mission_plan import MissionPlan
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import AltitudeReference, PlanningSettings, Waypoint
 from app.domain.models.search_area import GeoPoint, SearchArea
 from app.domain.models.telemetry import TelemetrySample
@@ -23,6 +24,10 @@ from app.geospatial.terrain_navigation import (
 )
 from app.geospatial.route_planning import generate_route
 from app.geospatial.search_area_validation import validate_search_area
+from app.mission.manual_input_safety import (
+    ManualInputFrame, ManualInputSafety, ManualSafetyLimits,
+    ManualSafetyDecision, NEUTRAL_VELOCITY,
+)
 from app.mission.errors import (
     MissionExecutionError,
     MissionExecutionErrorCode,
@@ -55,6 +60,11 @@ class VehicleControl(Protocol):
     async def return_to_launch(self) -> None: ...
 
     async def configure_safe_rtl(self, altitude_m: float) -> None: ...
+
+    async def send_manual_velocity(
+        self, forward_mps: float, right_mps: float,
+        up_mps: float, yaw_rate_deg_s: float,
+    ) -> None: ...
 
 
 class MissionService:
@@ -131,6 +141,14 @@ class MissionService:
         self._resuming_to_checkpoint = False
         self._background_execution_error: MissionExecutionError | None = None
         self._last_stall_log_at_utc: datetime | None = None
+
+        # One authoritative manual socket/epoch at a time. The action lock
+        # serializes every movement with Stop, camera-loss RTL and search guidance.
+        self._manual_epoch: str | None = None
+        self._manual_safety: ManualInputSafety | None = None
+        self._manual_started_at_s: float | None = None
+        self._manual_limits = ManualSafetyLimits()
+        self._manual_last_feedback: str | None = None
 
     @property
     def state(self) -> MissionState:
@@ -353,6 +371,8 @@ class MissionService:
                 raise
 
             execution.active_target = first_target
+            execution.flight_activity = FlightActivity.SEARCHING
+            execution.hold_reason = None
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._set_state(MissionState.RUNNING)
 
@@ -391,6 +411,308 @@ class MissionService:
             )
             return self._route_departure_anchor
 
+    def _require_manual_telemetry(self, sample: TelemetrySample) -> None:
+        # The manual safety gate requires a tighter freshness window than route
+        # planning; do not advertise readiness on a 2-3-second-old position.
+        age = self._telemetry_age_s(sample)
+        if not 0 <= age <= self._manual_limits.telemetry_max_age_s:
+            raise MissionExecutionError(
+                MissionExecutionErrorCode.VEHICLE_POSITION_UNAVAILABLE,
+                "Fresh vehicle telemetry is required for manual control.",
+                {"reason": "STALE_TELEMETRY"},
+            )
+
+    async def take_controls(self, execution_id: str) -> MissionExecution:
+        """Confirm BRAKE before assigning any manual authority.
+
+        Browser movement is not enabled by this HTTP response alone: a single
+        WebSocket must subsequently establish GUIDED and receive a new epoch.
+        """
+        async with self._action_lock:
+            execution = self._require_current_execution(execution_id)
+            if execution.state not in (MissionState.RUNNING, MissionState.PAUSED):
+                self._raise_action_not_allowed("take_controls")
+            if execution.flight_activity not in (FlightActivity.SEARCHING, FlightActivity.HOLDING):
+                self._raise_action_not_allowed("take_controls")
+            self._require_camera_ready()
+            vehicle = self._require_ready_vehicle()
+            status = vehicle.get_status()
+            if not status.armed or status.flight_mode not in ("GUIDED", "BRAKE"):
+                self._raise_action_not_allowed("take_controls")
+            if self._terrain_grid is None:
+                raise MissionExecutionError(
+                    MissionExecutionErrorCode.VEHICLE_NOT_READY,
+                    "Terrain data is required for manual flight.",
+                    {"reason": "TERRAIN_UNAVAILABLE"},
+                )
+            _, sample = await self._telemetry_hub.get_latest()
+            sample = self._validate_execution_telemetry(sample)
+            self._require_manual_telemetry(sample)
+            try:
+                self._terrain_grid.height_geo(sample.latitude_deg, sample.longitude_deg)
+            except ValueError as exc:
+                raise self._terrain_error(exc) from exc
+            # A running search records the original departure once; later manual
+            # diversions must not replace it. Resume uses terrain relocation via A.
+            if (self._route_departure_anchor is None and
+                    not self._recovery_commands and execution.active_target is not None):
+                departure = RouteDepartureAnchor(
+                    position=Waypoint(sample.latitude_deg, sample.longitude_deg,
+                                      sample.relative_altitude_m, AltitudeReference.HOME_RELATIVE),
+                    unfinished_target=execution.active_target,
+                    completed_count=len(execution.completed_targets),
+                )
+            else:
+                departure = None
+
+            # BRAKE is confirmed before disabling search progress and before
+            # declaring the handoff. Nothing sends manual velocity yet.
+            await self._call_vehicle(vehicle.hold())
+            if departure is not None:
+                self._route_departure_anchor = departure
+            self._last_guidance_target = None
+            self._last_guidance_sent_at = None
+            self._invalidate_manual_channel_locked()
+            execution.flight_activity = FlightActivity.MANUAL_CONTROL
+            execution.hold_reason = None
+            execution.manual_control_ready = False
+            self._set_state(MissionState.PAUSED)
+            return execution
+
+    async def give_controls(self, execution_id: str) -> MissionExecution:
+        """Drop input authority, neutralize, then confirm BRAKE; never auto-resume."""
+        async with self._action_lock:
+            execution = self._require_current_execution(execution_id)
+            if execution.state != MissionState.PAUSED or execution.flight_activity != FlightActivity.MANUAL_CONTROL:
+                self._raise_action_not_allowed("give_controls")
+            self._invalidate_manual_channel_locked()
+            execution.manual_control_ready = False
+            self._publish_execution()
+            vehicle = self._require_ready_vehicle()
+            try:
+                await self._neutral_if_guided_locked(vehicle)
+            except MissionExecutionError:
+                logger.warning("Manual neutral command failed; attempting confirmed BRAKE")
+            if not await self._brake_if_manual_mode_locked(vehicle):
+                raise MissionExecutionError(
+                    MissionExecutionErrorCode.VEHICLE_NOT_READY,
+                    "Vehicle mode changed before manual control could be released.",
+                    {"reason": "MODE_CHANGED"},
+                )
+            execution.flight_activity = FlightActivity.HOLDING
+            execution.hold_reason = HoldReason.MANUAL_RELEASE
+            self._publish_execution()
+            return execution
+
+    def _invalidate_manual_channel_locked(self) -> None:
+        self._manual_epoch = None
+        self._manual_safety = None
+        self._manual_started_at_s = None
+        self._manual_last_feedback = None
+        if self._current_execution is not None:
+            self._current_execution.manual_control_ready = False
+
+    async def _neutral_if_guided_locked(self, vehicle: VehicleControl) -> None:
+        status = vehicle.get_status()
+        if status.connected and status.armed and status.flight_mode == "GUIDED":
+            await self._call_vehicle(vehicle.send_manual_velocity(0.0, 0.0, 0.0, 0.0))
+
+    async def _brake_if_manual_mode_locked(self, vehicle: VehicleControl) -> bool:
+        """Never cancel a native RTL, landing, or vehicle failsafe with BRAKE."""
+        status = vehicle.get_status()
+        if not status.connected or not status.armed or status.flight_mode not in ("GUIDED", "BRAKE"):
+            return False
+        await self._call_vehicle(vehicle.hold())
+        return True
+
+    async def open_manual_channel(self) -> dict[str, object]:
+        """Reserve the sole socket and issue a fresh, nonreplayable control epoch."""
+        async with self._action_lock:
+            execution = self._current_execution
+            if (execution is None or execution.state != MissionState.PAUSED or
+                    execution.flight_activity != FlightActivity.MANUAL_CONTROL or
+                    self._manual_epoch is not None):
+                self._raise_action_not_allowed("open_manual_channel")
+            if self._terrain_grid is None:
+                self._raise_action_not_allowed("open_manual_channel")
+            vehicle = self._require_ready_vehicle()
+            status = vehicle.get_status()
+            if not status.armed or status.flight_mode not in ("BRAKE", "GUIDED"):
+                self._raise_action_not_allowed("open_manual_channel")
+            _, sample = await self._telemetry_hub.get_latest()
+            sample = self._validate_execution_telemetry(sample)
+            self._require_manual_telemetry(sample)
+            try:
+                self._terrain_grid.height_geo(sample.latitude_deg, sample.longitude_deg)
+            except ValueError as exc:
+                raise self._terrain_error(exc) from exc
+            gate = ManualInputSafety(self._terrain_grid, execution.execution_id,
+                                     str(uuid4()), self._manual_limits)
+            # GUIDED is only enabled with a real socket requesting a new epoch.
+            # A failure leaves BRAKE/PAUSED with no accepted movement authority.
+            try:
+                await self._call_vehicle(vehicle.set_guided())
+                await self._neutral_if_guided_locked(vehicle)
+            except MissionExecutionError:
+                try:
+                    await self._brake_if_manual_mode_locked(vehicle)
+                except MissionExecutionError:
+                    logger.exception("Manual socket setup failed and BRAKE could not be confirmed")
+                raise
+            self._manual_epoch = gate.control_epoch
+            self._manual_safety = gate
+            self._manual_started_at_s = time.monotonic()
+            self._manual_last_feedback = None
+            execution.manual_control_ready = True
+            self._publish_execution()
+            return {
+                "executionId": execution.execution_id,
+                "controlEpoch": gate.control_epoch,
+                "inputMaxAgeMs": gate.limits.input_max_age_ms,
+                "watchdogMs": round(gate.limits.watchdog_s * 1000),
+                "sendIntervalMs": 100,
+            }
+
+    async def manual_channel_input(self, epoch: str, data: Mapping[str, Any]) -> dict[str, object]:
+        """Validate input and send exactly one bounded velocity under action lock."""
+        async with self._action_lock:
+            if not self._manual_channel_active_locked(epoch):
+                return {"sequence": 0, "accepted": False, "revoked": True}
+            assert self._manual_safety is not None
+            vehicle = self._require_ready_vehicle()
+            if not vehicle.get_status().armed or vehicle.get_status().flight_mode != "GUIDED":
+                # RTL or disarm may come from the autopilot independently. Never
+                # issue neutral/BRAKE that could override native failsafe.
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                return {"sequence": 0, "accepted": False, "revoked": True}
+            _, latest = await self._telemetry_hub.get_latest()
+            try:
+                frame = ManualInputFrame.from_wire(data)
+            except (ValueError, TypeError, AttributeError):
+                # Never let a malformed frame preserve the prior forward command.
+                self._manual_safety.invalidate_input()
+                await self._neutral_if_guided_locked(vehicle)
+                return {"sequence": 0, "accepted": False}
+            now_s = time.monotonic()
+            # A packet arriving between watchdog ticks must not restart a
+            # previously silent nonzero command without a fresh key release.
+            if self._manual_safety.timed_out(now_s):
+                self._manual_safety.invalidate_input()
+            decision = self._manual_safety.evaluate(
+                frame, latest, vehicle.get_status(), now_monotonic_s=now_s)
+            velocity = decision.velocity if decision.accepted else NEUTRAL_VELOCITY
+            # Errors from MAVLink invalidate the stream, not just this individual
+            # packet: the controller must never keep accepting more key presses.
+            try:
+                await self._call_vehicle(vehicle.send_manual_velocity(
+                    velocity.forward_mps, velocity.right_mps,
+                    velocity.up_mps, velocity.yaw_rate_deg_s,
+                ))
+            except MissionExecutionError:
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                try:
+                    await self._brake_if_manual_mode_locked(vehicle)
+                except MissionExecutionError:
+                    logger.exception("Manual movement failed and BRAKE could not be confirmed")
+                raise
+            feedback = self._manual_feedback_code(decision)
+            result: dict[str, object] = {"sequence": frame.sequence, "accepted": decision.accepted}
+            if feedback != self._manual_last_feedback:
+                result["feedback"] = feedback
+                result["clearFeedback"] = self._manual_last_feedback
+                self._manual_last_feedback = feedback
+            return result
+
+    @staticmethod
+    def _manual_feedback_code(decision: ManualSafetyDecision) -> str | None:
+        return {
+            "TERRAIN_FLOOR": "TERRAIN_MIN", "TERRAIN_CEILING": "TERRAIN_MAX",
+            "TERRAIN_UNAVAILABLE": "TERRAIN_UNAVAILABLE",
+            "VEHICLE_UNAVAILABLE": "POSITION_UNAVAILABLE",
+            "HEADING_UNAVAILABLE": "POSITION_UNAVAILABLE",
+        }.get(decision.code)
+
+    def _manual_channel_active_locked(self, epoch: str) -> bool:
+        execution = self._current_execution
+        return (self._manual_epoch == epoch and self._manual_safety is not None and
+                execution is not None and execution.state == MissionState.PAUSED and
+                execution.flight_activity == FlightActivity.MANUAL_CONTROL and
+                execution.manual_control_ready)
+
+    async def manual_watchdog_tick(self, epoch: str) -> bool:
+        """Return False if the socket must close and establish a new epoch."""
+        async with self._action_lock:
+            if not self._manual_channel_active_locked(epoch):
+                return False
+            assert self._manual_safety is not None
+            try:
+                vehicle = self._require_ready_vehicle()
+            except MissionExecutionError:
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                return False
+            status = vehicle.get_status()
+            # Another controller changing the mode is an immediate loss of
+            # manual authority; do not send a GUIDED command into RTL/BRAKE.
+            if not status.armed or status.flight_mode != "GUIDED":
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                return False
+            _, telemetry = await self._telemetry_hub.get_latest()
+            now_s = time.monotonic()
+            neutral_needed = self._manual_safety.neutral_required(
+                now_monotonic_s=now_s, now_utc=datetime.now(timezone.utc),
+                telemetry=telemetry, status=status,
+            )
+            if not neutral_needed:
+                return True
+            try:
+                await self._neutral_if_guided_locked(vehicle)
+            except MissionExecutionError:
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                try:
+                    await self._brake_if_manual_mode_locked(vehicle)
+                except MissionExecutionError:
+                    logger.exception("Manual watchdog failed and BRAKE could not be confirmed")
+                return False
+            # Short gaps only neutralize velocity while remaining in GUIDED.
+            # Do not repeatedly BRAKE/reopen the socket for browser timer jitter.
+            # Truly silent channels are still revoked after a separate timeout.
+            if (self._manual_started_at_s is not None and
+                    self._manual_safety.session_silent(now_s, self._manual_started_at_s)):
+                logger.warning("Manual channel silent for %.1f seconds; releasing to BRAKE",
+                               self._manual_limits.session_silence_timeout_s)
+                self._invalidate_manual_channel_locked()
+                self._publish_execution()
+                try:
+                    await self._brake_if_manual_mode_locked(vehicle)
+                except MissionExecutionError:
+                    logger.exception("Manual channel silent: BRAKE not confirmed")
+                return False
+            return True
+
+    async def close_manual_channel(self, epoch: str) -> None:
+        """Socket loss neutralizes and BRAKEs, without an automatic RTL."""
+        async with self._action_lock:
+            if not self._manual_channel_active_locked(epoch):
+                return
+            self._invalidate_manual_channel_locked()
+            self._publish_execution()
+            vehicle = self._vehicle
+            if vehicle is None or not vehicle.get_status().connected:
+                return
+            try:
+                await self._neutral_if_guided_locked(vehicle)
+            except MissionExecutionError:
+                logger.warning("Manual socket neutral failed; requesting BRAKE")
+            try:
+                await self._brake_if_manual_mode_locked(vehicle)
+            except MissionExecutionError:
+                logger.exception("Manual socket closed but BRAKE could not be confirmed")
+
     async def pause(self, execution_id: str) -> MissionExecution:
         async with self._action_lock:
             execution = self._require_current_execution(execution_id)
@@ -404,6 +726,8 @@ class MissionService:
             await self._call_vehicle(vehicle.hold())
             self._last_guidance_target = None
             self._last_guidance_sent_at = None
+            execution.flight_activity = FlightActivity.HOLDING
+            execution.hold_reason = HoldReason.OPERATOR_PAUSE
             self._set_state(MissionState.PAUSED)
 
             return execution
@@ -413,7 +737,7 @@ class MissionService:
             self._raise_background_error_if_present()
             execution = self._require_current_execution(execution_id)
 
-            if execution.state != MissionState.PAUSED:
+            if execution.state != MissionState.PAUSED or execution.flight_activity != FlightActivity.HOLDING:
                 self._raise_action_not_allowed("resume")
 
             if execution.active_target is None:
@@ -465,6 +789,8 @@ class MissionService:
 
             # resend the saved target after switching back from BRAKE to GUIDED
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
+            execution.flight_activity = FlightActivity.SEARCHING
+            execution.hold_reason = None
             self._set_state(MissionState.RUNNING)
 
             return execution
@@ -503,9 +829,29 @@ class MissionService:
     async def _interrupt_execution_locked(
         self, execution: MissionExecution, reason: InterruptionReason,
     ) -> None:
+        manual_active = execution.flight_activity == FlightActivity.MANUAL_CONTROL
+        if manual_active:
+            # Revoke immediately even if heartbeat is already gone; a late
+            # browser packet must not remain eligible to command the vehicle.
+            self._invalidate_manual_channel_locked()
+            self._publish_execution()
         vehicle = self._require_ready_vehicle()
+        if manual_active:
+            try:
+                await self._neutral_if_guided_locked(vehicle)
+            except MissionExecutionError:
+                logger.warning("Could not send neutral before RTL; requesting RTL anyway")
         _, latest = await self._telemetry_hub.get_latest()
-        telemetry = self._validate_execution_telemetry(latest)
+        if manual_active:
+            try:
+                telemetry = self._validate_execution_telemetry(latest)
+            except MissionExecutionError:
+                # The aircraft's own RTL controller can still be commanded even
+                # when position telemetry to the dashboard is stale. A checkpoint
+                # cannot truthfully be recorded without fresh coordinates.
+                telemetry = None
+        else:
+            telemetry = self._validate_execution_telemetry(latest)
 
         # save where the aircraft actually stopped and which search target
         # it was following, continue needs both pieces
@@ -521,9 +867,11 @@ class MissionService:
         ):
             resume_target = execution.resume_checkpoint.active_target
             checkpoint = (execution.resume_checkpoint if self._terrain_grid is not None
-                          else ResumeCheckpoint(telemetry=telemetry, active_target=resume_target))
+                          else ResumeCheckpoint(telemetry=telemetry, active_target=resume_target)
+                          if telemetry is not None else execution.resume_checkpoint)
         else:
-            checkpoint = ResumeCheckpoint(telemetry=telemetry, active_target=resume_target)
+            checkpoint = (ResumeCheckpoint(telemetry=telemetry, active_target=resume_target)
+                          if telemetry is not None else execution.resume_checkpoint)
 
         execution.resume_checkpoint = checkpoint
         self._preserve_resume_anchor = False
@@ -532,6 +880,9 @@ class MissionService:
         await self._call_vehicle(vehicle.return_to_launch())
 
         execution.active_target = None
+        execution.flight_activity = None
+        execution.hold_reason = None
+        execution.manual_control_ready = False
         execution.interruption_reason = reason
         self._recovery_commands = ()
         self._recovery_index = 0
@@ -682,6 +1033,8 @@ class MissionService:
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = True
             execution.interruption_reason = None
+            execution.flight_activity = FlightActivity.SEARCHING
+            execution.hold_reason = None
             self._set_state(MissionState.RUNNING)
 
             return execution
@@ -742,6 +1095,25 @@ class MissionService:
 
     async def shutdown(self) -> None:
         """Stop the execution monitor during application/test shutdown."""
+        # On app shutdown, invalidate the input stream first. The vehicle is
+        # separately stopped by bootstrap; here we request BRAKE if reachable.
+        if self._manual_epoch is not None or (
+            self._current_execution is not None
+            and self._current_execution.flight_activity == FlightActivity.MANUAL_CONTROL
+        ):
+            self._invalidate_manual_channel_locked()
+            if self._current_execution is not None:
+                self._current_execution.manual_control_ready = False
+            if self._vehicle is not None and self._vehicle.get_status().connected:
+                try:
+                    await self._neutral_if_guided_locked(self._vehicle)
+                except MissionExecutionError:
+                    logger.warning("Neutral command failed during shutdown; requesting BRAKE")
+                try:
+                    await self._brake_if_manual_mode_locked(self._vehicle)
+                except MissionExecutionError:
+                    logger.exception("Could not confirm BRAKE during manual-control shutdown")
+
         task = self._execution_monitor_task
 
         if task is None:
@@ -871,6 +1243,17 @@ class MissionService:
                                 vehicle = self._vehicle
                                 if vehicle is not None:
                                     status = vehicle.get_status()
+                                    if status.connected and status.flight_mode == "RTL":
+                                        # ArduPilot may enter RTL independently due
+                                        # to its own failsafe. Never send another
+                                        # search target or BRAKE over that return.
+                                        self._invalidate_manual_channel_locked()
+                                        execution.active_target = None
+                                        execution.flight_activity = None
+                                        execution.hold_reason = None
+                                        self._return_terminal_state = MissionState.INTERRUPTED
+                                        self._set_state(MissionState.RETURNING_HOME)
+                                        continue
                                     if status.connected and not status.armed:
                                         raise MissionExecutionError(
                                             code=MissionExecutionErrorCode.VEHICLE_NOT_READY,
@@ -985,6 +1368,9 @@ class MissionService:
         await self._call_vehicle(vehicle.return_to_launch())
 
         execution.active_target = None
+        execution.flight_activity = None
+        execution.hold_reason = None
+        execution.manual_control_ready = False
         self._return_terminal_state = MissionState.COMPLETED
         self._set_state(MissionState.RETURNING_HOME)
 
@@ -1136,6 +1522,8 @@ class MissionService:
             )
         except ValueError as exc:
             await self._call_vehicle(self._require_ready_vehicle().hold())
+            execution.flight_activity = FlightActivity.HOLDING
+            execution.hold_reason = None
             self._set_state(MissionState.PAUSED)
             raise self._terrain_error(exc) from exc
         climbing_in_place = (
@@ -1226,6 +1614,9 @@ class MissionService:
         await self._call_vehicle(vehicle.return_to_launch())
         self._navigation_target = None
         execution.active_target = None
+        execution.flight_activity = None
+        execution.hold_reason = None
+        execution.manual_control_ready = False
         self._return_terminal_state = MissionState.COMPLETED
         self._set_state(MissionState.RETURNING_HOME)
 

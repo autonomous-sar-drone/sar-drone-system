@@ -86,3 +86,21 @@ async def continue_mission(
     except MissionExecutionError as error:
         raise _http_error(error) from error
     return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/take-controls", response_model=MissionExecutionResponse)
+async def take_controls(execution_id: str, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).take_controls(execution_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/give-controls", response_model=MissionExecutionResponse)
+async def give_controls(execution_id: str, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).give_controls(execution_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)

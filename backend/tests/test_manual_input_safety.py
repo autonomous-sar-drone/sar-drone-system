@@ -374,3 +374,13 @@ def test_ground_speed_expands_predictive_braking_buffer():
     arm_input(gate, moving)
     assert evaluate(gate, moving, 2, ManualAxes(1, 0, 0, 0)).code == "TERRAIN_FLOOR"
     assert evaluate(gate, moving, 3, ManualAxes(0, 0, 1, 0)).velocity == ManualVelocity(up_mps=0.75)
+
+
+def test_separate_soft_and_hard_manual_input_timeouts():
+    """Stale input neutralizes well before the longer socket revocation deadline."""
+    limits = ManualSafetyLimits()
+    assert limits.session_silence_timeout_s > limits.watchdog_s
+    with pytest.raises(ValueError):
+        ManualSafetyLimits(session_silence_timeout_s=0.45)
+    with pytest.raises(ValueError):
+        ManualSafetyLimits(session_silence_timeout_s=float("nan"))

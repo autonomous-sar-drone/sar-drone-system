@@ -95,24 +95,30 @@ class ManualSafetyLimits:
     input_max_age_ms: int = 500
     future_tolerance_ms: int = 250
     watchdog_s: float = 0.45
+    # A short packet gap neutralizes movement but must not change flight mode.
+    # A genuinely silent channel is revoked only after this longer interval.
+    session_silence_timeout_s: float = 3.0
     telemetry_max_age_s: float = 1.5
 
     def __post_init__(self) -> None:
         scalars = (self.horizontal_mps, self.vertical_mps, self.yaw_deg_s,
                    self.min_agl_m, self.max_agl_m, self.lower_buffer_m,
                    self.upper_buffer_m, self.release_hysteresis_m,
-                   self.terrain_lookahead_s, self.watchdog_s, self.telemetry_max_age_s)
+                   self.terrain_lookahead_s, self.watchdog_s,
+                   self.session_silence_timeout_s, self.telemetry_max_age_s)
         if not all(math.isfinite(value) for value in scalars):
             raise ValueError("Manual flight limits must be finite")
         if (min(self.horizontal_mps, self.vertical_mps, self.yaw_deg_s,
-                self.watchdog_s, self.telemetry_max_age_s) <= 0
+                self.watchdog_s, self.session_silence_timeout_s,
+                self.telemetry_max_age_s) <= 0
                 or self.min_agl_m < 0 or self.max_agl_m <= self.min_agl_m
                 or min(self.lower_buffer_m, self.upper_buffer_m,
                        self.release_hysteresis_m, self.terrain_lookahead_s) < 0
                 or self.min_agl_m + self.lower_buffer_m + self.release_hysteresis_m
                    >= self.max_agl_m - self.upper_buffer_m - self.release_hysteresis_m
                 or type(self.input_max_age_ms) is not int or self.input_max_age_ms <= 0
-                or type(self.future_tolerance_ms) is not int or self.future_tolerance_ms < 0):
+                or type(self.future_tolerance_ms) is not int or self.future_tolerance_ms < 0
+                or self.session_silence_timeout_s <= self.watchdog_s):
             raise ValueError("Manual flight limits are inconsistent")
 
 
@@ -138,6 +144,26 @@ class ManualInputSafety:
         self._last_input_at_s: float | None = None
         self._requires_neutral = True  # fresh ownership starts with released keys
         self._altitude_lock: str | None = None
+
+    def invalidate_input(self) -> None:
+        """Require a released-key frame after a rejected or interrupted stream."""
+        self._requires_neutral = True
+
+    def timed_out(self, now_monotonic_s: float) -> bool:
+        return (self._last_input_at_s is None or
+                now_monotonic_s - self._last_input_at_s > self.limits.watchdog_s or
+                now_monotonic_s < self._last_input_at_s)
+
+    def session_silent(self, now_monotonic_s: float, started_at_s: float) -> bool:
+        """Hard timeout measured from the latest valid input or session start.
+
+        Fresh, well-formed zero-axis input counts as an active heartbeat;
+        malformed or stale packets do not keep abandoned ownership alive.
+        Clock regressions fail safe.
+        """
+        last_s = self._last_input_at_s if self._last_input_at_s is not None else started_at_s
+        return (now_monotonic_s < last_s or
+                now_monotonic_s - last_s > self.limits.session_silence_timeout_s)
 
     def _healthy(self, telemetry: TelemetrySample | None, status: VehicleStatus,
                  now_utc: datetime) -> bool:
@@ -170,9 +196,7 @@ class ManualInputSafety:
                     telemetry.latitude_deg, telemetry.longitude_deg))
             except (ValueError, OverflowError):
                 healthy = False
-        timed_out = (self._last_input_at_s is None or
-                     now_monotonic_s - self._last_input_at_s > self.limits.watchdog_s or
-                     now_monotonic_s < self._last_input_at_s)
+        timed_out = self.timed_out(now_monotonic_s)
         if not healthy or timed_out:
             self._requires_neutral = True
             return True
