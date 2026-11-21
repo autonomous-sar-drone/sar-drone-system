@@ -12,6 +12,7 @@ from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_vehicle import (
     MavlinkVehicle,
     POSITION_ONLY_TYPE_MASK,
+    VELOCITY_YAW_RATE_TYPE_MASK,
 )
 
 
@@ -37,6 +38,7 @@ class FakeMav:
         self.position_target_calls: list[
             tuple[Any, ...]
         ] = []
+        self.local_target_calls: list[tuple[Any, ...]] = []
 
     def param_set_send(self, *args: Any) -> None:
         self.param_set_calls.append(args)
@@ -55,6 +57,9 @@ class FakeMav:
         *args: Any,
     ) -> None:
         self.position_target_calls.append(args)
+
+    def set_position_target_local_ned_send(self, *args: Any) -> None:
+        self.local_target_calls.append(args)
 
 
 class FakeConnection:
@@ -613,3 +618,98 @@ async def test_rtl_parameters_are_not_changed_while_armed():
     with pytest.raises(VehicleCommandError, match="while armed"):
         await vehicle.configure_safe_rtl(50)
     assert connection.mav.param_set_calls == []
+
+@pytest.mark.asyncio
+async def test_manual_velocity_sends_body_relative_velocity_and_yaw_rate() -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+
+    await vehicle.send_manual_velocity(1.5, -0.75, 0.5, 20.0)
+
+    assert len(connection.mav.local_target_calls) == 1
+    call = connection.mav.local_target_calls[0]
+    assert call[0:5] == (
+        0, 1, 1, MAVLINK.MAV_FRAME_BODY_OFFSET_NED,
+        VELOCITY_YAW_RATE_TYPE_MASK,
+    )
+    assert VELOCITY_YAW_RATE_TYPE_MASK == 1479
+    assert call[5:8] == (0.0, 0.0, 0.0)
+    assert call[8:11] == pytest.approx((1.5, -0.75, -0.5))
+    assert call[11:15] == (0.0, 0.0, 0.0, 0.0)
+    assert call[15] == pytest.approx(0.3490658504)
+    assert connection.mav.position_target_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ((2.0, 0.0, 0.0, 0.0), (2.0, 0.0, 0.0, 0.0)),
+        ((-2.0, 0.0, 0.0, 0.0), (-2.0, 0.0, 0.0, 0.0)),
+        ((0.0, 2.0, 0.0, 0.0), (0.0, 2.0, 0.0, 0.0)),
+        ((0.0, 0.0, -0.75, -20.0), (0.0, 0.0, 0.75, -0.3490658504)),
+        ((0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0)),
+        ((1.0, 0.5, 0.75, 10.0), (1.0, 0.5, -0.75, 0.1745329252)),
+    ],
+)
+async def test_manual_velocity_signs_combined_axes_and_neutral(
+    values: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float],
+) -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    await vehicle.send_manual_velocity(*values)
+    call = connection.mav.local_target_calls[-1]
+    assert (call[8], call[9], call[10], call[15]) == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,armed", [("BRAKE", True), ("RTL", True), ("GUIDED", False)])
+async def test_manual_velocity_rejects_ineligible_aircraft(mode: str, armed: bool) -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat(mode, armed=armed))
+    with pytest.raises(VehicleCommandError, match="GUIDED|armed"):
+        await vehicle.send_manual_velocity(1.0, 0.0, 0.0, 0.0)
+    assert connection.mav.local_target_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_velocity_rejects_missing_or_stale_heartbeat() -> None:
+    from datetime import timedelta
+    vehicle, connection, _ = make_vehicle()
+    with pytest.raises(VehicleCommandError, match="heartbeat"):
+        await vehicle.send_manual_velocity(1.0, 0.0, 0.0, 0.0)
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    assert vehicle._last_heartbeat_utc is not None
+    vehicle._last_heartbeat_utc -= timedelta(seconds=10)
+    with pytest.raises(VehicleCommandError, match="heartbeat"):
+        await vehicle.send_manual_velocity(1.0, 0.0, 0.0, 0.0)
+    assert connection.mav.local_target_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+async def test_manual_velocity_rejects_nonfinite_input(bad: float) -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    with pytest.raises(ValueError, match="finite"):
+        await vehicle.send_manual_velocity(0.0, 0.0, bad, 0.0)
+    assert connection.mav.local_target_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_velocity_waits_for_mode_transition_lock() -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("BRAKE", armed=True))
+    guided_task = asyncio.create_task(vehicle.set_guided())
+    await asyncio.sleep(0)
+    assert connection.set_mode_calls == [4]
+
+    movement_task = asyncio.create_task(vehicle.send_manual_velocity(1, 0, 0, 0))
+    await asyncio.sleep(0)
+    assert connection.mav.local_target_calls == []
+
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    await guided_task
+    await movement_task
+    assert len(connection.mav.local_target_calls) == 1
