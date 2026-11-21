@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 MAVLINK_ENDPOINT: str = os.getenv("MAVLINK_ENDPOINT", "tcp:127.0.0.1:5762")
 
@@ -65,3 +66,20 @@ VISION_DETECTOR_STALE_AFTER_S: float = float(os.getenv("VISION_DETECTOR_STALE_AF
 VISION_CANDIDATE_CONFIRMATION_S: float = float(os.getenv("VISION_CANDIDATE_CONFIRMATION_S", "1.0"))
 VISION_CANDIDATE_GRACE_S: float = float(os.getenv("VISION_CANDIDATE_GRACE_S", "2.0"))
 VISION_CANDIDATE_MIN_OBSERVATIONS: int = int(os.getenv("VISION_CANDIDATE_MIN_OBSERVATIONS", "2"))
+
+# Saved Manor terrain grid used by autonomous navigation.
+SAR_TERRAIN_JSON: str = os.getenv(
+    "SAR_TERRAIN_JSON",
+    str(Path(__file__).resolve().parents[3] /
+        "tools/terrain/reference/manor_prairie_240_flight_v2_terrain.json"),
+)
+SAR_TERRAIN_WAYPOINT_SPACING_M: float = float(
+    os.getenv("SAR_TERRAIN_WAYPOINT_SPACING_M", "5.0")
+)
+
+SAR_TERRAIN_LOOKAHEAD_M: float = float(os.getenv("SAR_TERRAIN_LOOKAHEAD_M", "8.0"))
+
+# Keep native RTL home-relative until independent low-altitude terrain data is reliable.
+SAR_RTL_MIN_HOME_ALTITUDE_M: float = float(os.getenv("SAR_RTL_MIN_HOME_ALTITUDE_M", "50.0"))
+SAR_RTL_MIN_CLEARANCE_M: float = float(os.getenv("SAR_RTL_MIN_CLEARANCE_M", "20.0"))
+SAR_RTL_TERRAIN_MARGIN_M: float = float(os.getenv("SAR_RTL_TERRAIN_MARGIN_M", "5.0"))

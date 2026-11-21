@@ -1,0 +1,17 @@
+{
+  "source_world": "worlds/manor_prairie_240_flight_v2.wbt",
+  "world_sha256": "bcaa827ef1a88a65291950d752dedf1073a658e1dba540a111b46b3b5fe41b1e",
+  "source_grid": "terrain-generated/terrain.json (original 320 m USGS DEM derived)",
+  "cropped_height_rows": "10..70 inclusive",
+  "cropped_height_columns": "10..70 inclusive",
+  "matched_world_height_values": 3721,
+  "actual_world_extent_m": [
+    240,
+    240
+  ],
+  "original_home_latlon": [
+    30.3678,
+    -97.5396
+  ],
+  "note": "Exact source assets from 2026-11-15 archives; not yet tested in a live Webots session after scenery modification."
+}
