@@ -3,7 +3,7 @@ from app.api.schemas.mission_execution import (
     mission_execution_response_from_domain,
 )
 from app.domain.models.mission_execution import MissionExecution
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import AltitudeReference, Waypoint
 
 
@@ -39,6 +39,10 @@ def test_execution_response_matches_frontend_contract() -> None:
         "planId": "plan-123",
         "missionState": "RUNNING",
         "interruptionReason": None,
+        "flightActivity": None,
+        "holdReason": None,
+        "activeRevisitCandidateId": None,
+        "manualControlReady": False,
         "activeTarget": {
             "latitudeDeg": 30.2674,
             "longitudeDeg": -97.7430,
@@ -63,5 +67,48 @@ def test_execution_response_allows_no_active_target() -> None:
         "planId": "plan-123",
         "missionState": "RETURNING_HOME",
         "interruptionReason": None,
+        "flightActivity": None,
+        "holdReason": None,
+        "activeRevisitCandidateId": None,
+        "manualControlReady": False,
         "activeTarget": None,
     }
+
+
+# Phase 2 status is authored by the backend; it can represent moving PAUSED states.
+def test_execution_response_exposes_phase2_status() -> None:
+    execution = MissionExecution(
+        execution_id="exe", plan_id="plan", state=MissionState.PAUSED,
+        flight_activity=FlightActivity.MANUAL_CONTROL,
+        manual_control_ready=True,
+    )
+    response = mission_execution_response_from_domain(execution)
+    payload = response.model_dump(by_alias=True, mode="json")
+    assert payload["missionState"] == "PAUSED"
+    assert payload["flightActivity"] == "MANUAL_CONTROL"
+    assert payload["holdReason"] is None
+    assert payload["activeRevisitCandidateId"] is None
+    assert payload["manualControlReady"] is True
+
+    execution.flight_activity = FlightActivity.HOLDING
+    execution.hold_reason = HoldReason.REVISIT_ARRIVAL
+    execution.manual_control_ready = False
+    payload = mission_execution_response_from_domain(execution).model_dump(
+        by_alias=True, mode="json",
+    )
+    assert payload["flightActivity"] == "HOLDING"
+    assert payload["holdReason"] == "REVISIT_ARRIVAL"
+    assert payload["manualControlReady"] is False
+
+
+def test_execution_response_revisit_id_is_not_a_location() -> None:
+    execution = MissionExecution(
+        execution_id="exe", plan_id="plan", state=MissionState.PAUSED,
+        flight_activity=FlightActivity.REVISITING,
+        active_revisit_candidate_id="candidate-7",
+    )
+    payload = mission_execution_response_from_domain(execution).model_dump(
+        by_alias=True, mode="json",
+    )
+    assert payload["flightActivity"] == "REVISITING"
+    assert payload["activeRevisitCandidateId"] == "candidate-7"

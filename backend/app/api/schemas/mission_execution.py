@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.domain.models.mission_execution import MissionExecution, InterruptionReason
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import AltitudeReference
 from app.runtime.mission_hub import MissionSnapshot
 
@@ -32,6 +32,18 @@ class MissionExecutionResponse(BaseModel):
     interruption_reason: InterruptionReason | None = Field(
         default=None, serialization_alias="interruptionReason"
     )
+    flight_activity: FlightActivity | None = Field(
+        default=None, serialization_alias="flightActivity"
+    )
+    hold_reason: HoldReason | None = Field(
+        default=None, serialization_alias="holdReason"
+    )
+    active_revisit_candidate_id: str | None = Field(
+        default=None, serialization_alias="activeRevisitCandidateId"
+    )
+    manual_control_ready: bool = Field(
+        default=False, serialization_alias="manualControlReady"
+    )
 
 
 # the frontend only needs the current mission state and target, not the full history
@@ -54,6 +66,10 @@ def mission_execution_response_from_domain(
         mission_state=execution.state,
         active_target=active_target,
         interruption_reason=execution.interruption_reason,
+        flight_activity=execution.flight_activity,
+        hold_reason=execution.hold_reason,
+        active_revisit_candidate_id=execution.active_revisit_candidate_id,
+        manual_control_ready=execution.manual_control_ready,
     )
 
 class RuntimeErrorResponse(BaseModel):
@@ -94,6 +110,10 @@ def mission_update_event_from_snapshot(snapshot: MissionSnapshot) -> MissionUpda
             mission_state=snapshot.state,
             active_target=active_target,
             interruption_reason=snapshot.interruption_reason,
+            flight_activity=snapshot.flight_activity,
+            hold_reason=snapshot.hold_reason,
+            active_revisit_candidate_id=snapshot.active_revisit_candidate_id,
+            manual_control_ready=snapshot.manual_control_ready,
             runtime_error=RuntimeErrorResponse(
                 code=snapshot.runtime_error.code,
                 message=snapshot.runtime_error.message,

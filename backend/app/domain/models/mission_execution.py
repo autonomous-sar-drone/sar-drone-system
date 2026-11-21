@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import Waypoint
 from app.domain.models.telemetry import TelemetrySample
 
@@ -26,3 +26,9 @@ class MissionExecution:
     telemetry_history: list[TelemetrySample] = field(default_factory=list)
     resume_checkpoint: ResumeCheckpoint | None = None
     interruption_reason: InterruptionReason | None = None
+
+    # Phase 2 starts inactive until server-side control authority is implemented.
+    flight_activity: FlightActivity | None = None
+    hold_reason: HoldReason | None = None
+    active_revisit_candidate_id: str | None = None
+    manual_control_ready: bool = False

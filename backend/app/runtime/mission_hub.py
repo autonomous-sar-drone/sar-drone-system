@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.domain.models.mission_execution import MissionExecution, InterruptionReason
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import Waypoint
 from app.mission.errors import MissionExecutionError
 
@@ -24,6 +24,10 @@ class MissionSnapshot:
     active_target: Waypoint | None
     runtime_error: MissionRuntimeError | None = None
     interruption_reason: InterruptionReason | None = None
+    flight_activity: FlightActivity | None = None
+    hold_reason: HoldReason | None = None
+    active_revisit_candidate_id: str | None = None
+    manual_control_ready: bool = False
 
 
 class MissionHub:
@@ -45,6 +49,10 @@ class MissionHub:
             state=execution.state,
             active_target=execution.active_target,
             interruption_reason=execution.interruption_reason,
+            flight_activity=execution.flight_activity,
+            hold_reason=execution.hold_reason,
+            active_revisit_candidate_id=execution.active_revisit_candidate_id,
+            manual_control_ready=execution.manual_control_ready,
             # copy error details too, since the original dictionary can still change
             runtime_error=MissionRuntimeError(
                 code=runtime_error.code.value,
