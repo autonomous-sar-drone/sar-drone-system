@@ -713,3 +713,20 @@ async def test_manual_velocity_waits_for_mode_transition_lock() -> None:
     await guided_task
     await movement_task
     assert len(connection.mav.local_target_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values", [
+    (2.01, 0.0, 0.0, 0.0),
+    (2.0, 2.0, 0.0, 0.0),
+    (0.0, 0.0, 0.751, 0.0),
+    (0.0, 0.0, -0.751, 0.0),
+    (0.0, 0.0, 0.0, 20.01),
+    (0.0, 0.0, 0.0, -20.01),
+])
+async def test_manual_vehicle_adapter_refuses_commands_above_speed_limits(values):
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    with pytest.raises(ValueError, match="limits"):
+        await vehicle.send_manual_velocity(*values)
+    assert connection.mav.local_target_calls == []

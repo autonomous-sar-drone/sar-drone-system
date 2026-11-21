@@ -248,6 +248,12 @@ class MavlinkVehicle:
         values = (forward_mps, right_mps, up_mps, yaw_rate_deg_s)
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Manual velocity and yaw rate must be finite")
+        # Final vehicle-level bounds protect against accidentally bypassing the
+        # higher-level manual-input safety gate. Do not silently clamp a bad caller.
+        if (math.hypot(forward_mps, right_mps) > 2.0 + 1e-6
+                or abs(up_mps) > 0.75 + 1e-6
+                or abs(yaw_rate_deg_s) > 20.0 + 1e-6):
+            raise ValueError("Manual velocity exceeds speed or yaw-rate limits")
 
         # serialize with mode changes, and check the confirmed mode before sending
         async with self._command_lock:
