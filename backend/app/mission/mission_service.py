@@ -411,6 +411,20 @@ class MissionService:
             )
             return self._route_departure_anchor
 
+    def _safe_route_departure_target(self, desired_agl_m: float) -> Waypoint:
+        """Rejoin the captured XY without demanding an unsafe captured altitude."""
+        anchor = self._route_departure_anchor
+        grid = self._terrain_grid
+        if anchor is None or grid is None:
+            raise ValueError("Original route departure is missing")
+        position = anchor.position
+        ground = grid.height_geo(position.latitude_deg, position.longitude_deg)
+        return Waypoint(
+            position.latitude_deg, position.longitude_deg,
+            max(position.altitude_m, ground + desired_agl_m + 1.0),
+            AltitudeReference.HOME_RELATIVE,
+        )
+
     def _require_manual_telemetry(self, sample: TelemetrySample) -> None:
         # The manual safety gate requires a tighter freshness window than route
         # planning; do not advertise readiness on a 2-3-second-old position.
@@ -432,7 +446,9 @@ class MissionService:
             execution = self._require_current_execution(execution_id)
             if execution.state not in (MissionState.RUNNING, MissionState.PAUSED):
                 self._raise_action_not_allowed("take_controls")
-            if execution.flight_activity not in (FlightActivity.SEARCHING, FlightActivity.HOLDING):
+            if execution.flight_activity not in (
+                    FlightActivity.SEARCHING, FlightActivity.HOLDING,
+                    FlightActivity.REJOINING):
                 self._raise_action_not_allowed("take_controls")
             self._require_camera_ready()
             vehicle = self._require_ready_vehicle()
@@ -753,7 +769,12 @@ class MissionService:
                 _, latest = await self._telemetry_hub.get_latest()
                 sample = self._validate_execution_telemetry(latest)
                 if self._route_departure_anchor is not None:
-                    destinations = (self._route_departure_anchor.position,)
+                    try:
+                        destinations = (self._safe_route_departure_target(
+                            self._require_current_plan(execution.plan_id).planning_settings.search_altitude_m,
+                        ),)
+                    except ValueError as exc:
+                        raise self._terrain_error(exc) from exc
                 elif self._recovery_commands:
                     destinations = tuple(self._recovery_commands[i]
                                          for i in self._recovery_segment_ends
@@ -787,9 +808,11 @@ class MissionService:
             else:
                 await self._send_navigation_target(vehicle, execution.active_target)
 
-            # resend the saved target after switching back from BRAKE to GUIDED
+            # Resume remains in REJOINING until the captured route position is reached.
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
-            execution.flight_activity = FlightActivity.SEARCHING
+            execution.flight_activity = (
+                FlightActivity.REJOINING if self._recovery_commands else FlightActivity.SEARCHING
+            )
             execution.hold_reason = None
             self._set_state(MissionState.RUNNING)
 
@@ -941,7 +964,9 @@ class MissionService:
                     departure = Waypoint(telemetry.latitude_deg, telemetry.longitude_deg,
                                          departure_altitude, AltitudeReference.HOME_RELATIVE)
                     if self._route_departure_anchor is not None:
-                        destinations = (self._route_departure_anchor.position,)
+                        destinations = (self._safe_route_departure_target(
+                            plan.planning_settings.search_altitude_m,
+                        ),)
                     else:
                         checkpoint_ground = self._terrain_grid.height_geo(
                             checkpoint.telemetry.latitude_deg,
@@ -1033,7 +1058,9 @@ class MissionService:
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._resuming_to_checkpoint = True
             execution.interruption_reason = None
-            execution.flight_activity = FlightActivity.SEARCHING
+            execution.flight_activity = (
+                FlightActivity.REJOINING if recovery_commands else FlightActivity.SEARCHING
+            )
             execution.hold_reason = None
             self._set_state(MissionState.RUNNING)
 
@@ -1581,6 +1608,7 @@ class MissionService:
                     self._last_guidance_target = None
                     self._last_guidance_sent_at = None
                     await self._guide_search(execution, sample, vehicle, force=True)
+                    execution.flight_activity = FlightActivity.SEARCHING
                     execution.active_target = plan.route.waypoints[
                         self._navigation_commands[self._navigation_index].visible_index
                     ]
