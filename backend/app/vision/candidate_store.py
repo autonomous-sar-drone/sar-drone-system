@@ -10,7 +10,7 @@ import math
 from uuid import uuid4
 
 from app.domain.models.detection import (
-    DetectionCandidate, EstimatedPersonLocation, PixelBoundingBox,
+    CaptureViewpoint, DetectionCandidate, EstimatedPersonLocation, PixelBoundingBox,
 )
 
 
@@ -126,6 +126,7 @@ class CandidateStore:
         snapshot_jpeg: bytes, estimated_location: EstimatedPersonLocation | None,
         execution_id: str | None = None,
         capture_metadata: CandidateCaptureMetadata | None = None,
+        capture_viewpoint: CaptureViewpoint | None = None,
     ) -> DetectionCandidate:
         """Called internally after evidence selection; not a public creation API."""
         first = _aware_utc(first_observed_at)
@@ -138,6 +139,8 @@ class CandidateStore:
             raise TypeError("bounding_box must be a PixelBoundingBox")
         if estimated_location is not None and not isinstance(estimated_location, EstimatedPersonLocation):
             raise TypeError("estimated_location must be an EstimatedPersonLocation or None")
+        if capture_viewpoint is not None and not isinstance(capture_viewpoint, CaptureViewpoint):
+            raise TypeError("capture_viewpoint must be CaptureViewpoint")
         if capture_metadata is not None:
             if not isinstance(capture_metadata, CandidateCaptureMetadata):
                 raise TypeError("capture_metadata must be CandidateCaptureMetadata")
@@ -157,6 +160,7 @@ class CandidateStore:
             confidence=confidence, bounding_box=bounding_box,
             estimated_location=estimated_location,
             snapshot_url=f"/api/detections/{candidate_id}/snapshot",
+            capture_viewpoint=capture_viewpoint,
         )
         self._next_number += 1
         self._by_id[candidate_id] = candidate

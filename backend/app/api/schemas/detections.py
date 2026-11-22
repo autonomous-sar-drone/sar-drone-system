@@ -40,6 +40,8 @@ class DetectionCandidateView(BaseModel):
     bounding_box: PixelBoundingBoxView = Field(alias="boundingBox")
     estimated_location: EstimatedPersonLocationView | None = Field(alias="estimatedLocation")
     snapshot_url: str = Field(alias="snapshotUrl")
+    revisit_available: bool = Field(alias="revisitAvailable")
+    revisit_unavailable_reason: str | None = Field(alias="revisitUnavailableReason")
 
 
 class DetectionCollectionView(BaseModel):
@@ -87,6 +89,17 @@ def candidate_view(candidate: DetectionCandidate) -> DetectionCandidateView:
             method=location.method, quality=location.quality,
         ) if location is not None else None,
         snapshot_url=candidate.snapshot_url,
+        revisit_available=(candidate.execution_id is not None
+                           and candidate.capture_viewpoint is not None
+                           and candidate.status != "DISMISSED"),
+        revisit_unavailable_reason=(
+            "This sighting was not captured during a search mission."
+            if candidate.execution_id is None else
+            "Historical aircraft pose was not recorded."
+            if candidate.capture_viewpoint is None else
+            "This sighting was dismissed."
+            if candidate.status == "DISMISSED" else None
+        ),
     )
 
 

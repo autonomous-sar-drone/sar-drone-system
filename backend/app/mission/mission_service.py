@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from uuid import uuid4
 from app.domain.models.mission_execution import MissionExecution, ResumeCheckpoint, InterruptionReason
 from app.domain.models.mission_plan import MissionPlan
 from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
+from app.vision.candidate_store import CandidateNotFound, CandidateStore
 from app.domain.models.route import AltitudeReference, PlanningSettings, Waypoint
 from app.domain.models.search_area import GeoPoint, SearchArea
 from app.domain.models.telemetry import TelemetrySample
@@ -55,6 +57,8 @@ class VehicleControl(Protocol):
 
     async def go_to(self, target: Waypoint) -> None: ...
 
+    async def point_at_viewpoint(self, target: Waypoint, yaw_rad: float) -> None: ...
+
     async def hold(self) -> None: ...
 
     async def return_to_launch(self) -> None: ...
@@ -88,11 +92,14 @@ class MissionService:
         terrain_step_m: float = 5.0,
         terrain_lookahead_m: float = 8.0,
         rtl_home_altitude_m: float | None = None,
+        candidate_store: CandidateStore | None = None,
     ) -> None:
         self._telemetry_hub = telemetry_hub
         self._mission_hub = mission_hub
         # The production bootstrap provides camera health. Optional for older service tests.
         self._camera_available = camera_available
+        self._candidate_store = candidate_store
+        self._execution_started_unix_ms: int | None = None
         self._past_executions: list[MissionExecution] = []
         self._active_target_sent_at_utc: datetime | None = None
         self._default_planning_settings = default_planning_settings
@@ -119,6 +126,13 @@ class MissionService:
         self._preserve_resume_anchor = False
         self._route_departure_anchor: RouteDepartureAnchor | None = None
         self._recovery_climb_target: Waypoint | None = None
+        self._revisit_commands: tuple[Waypoint, ...] = ()
+        self._revisit_ends: tuple[int, ...] = ()
+        self._revisit_index = 0
+        self._revisit_origin: Waypoint | None = None
+        self._revisit_climb_target: Waypoint | None = None
+        self._revisit_yaw_rad: float | None = None
+        self._revisit_yaw_requested_at_s: float | None = None
 
         self._target_reached_tolerance_m = target_reached_tolerance_m
         self._target_altitude_tolerance_m = target_altitude_tolerance_m
@@ -149,6 +163,17 @@ class MissionService:
         self._manual_started_at_s: float | None = None
         self._manual_limits = ManualSafetyLimits()
         self._manual_last_feedback: str | None = None
+
+    def execution_id_at_capture(self, capture_unix_ms: int) -> str | None:
+        """Associate evidence only with an execution already searching at capture time."""
+        execution = self._current_execution
+        start = self._execution_started_unix_ms
+        if (execution is None or start is None or
+                execution.state not in (MissionState.RUNNING, MissionState.PAUSED) or
+                capture_unix_ms < start or
+                capture_unix_ms > int(datetime.now(timezone.utc).timestamp() * 1000) + 250):
+            return None
+        return execution.execution_id
 
     @property
     def state(self) -> MissionState:
@@ -299,6 +324,8 @@ class MissionService:
             self._preserve_resume_anchor = False
             self._route_departure_anchor = None
             self._recovery_climb_target = None
+            self._execution_started_unix_ms = None
+            self._clear_revisit_locked()
 
             execution = MissionExecution(
                 execution_id=str(uuid4()),
@@ -375,6 +402,7 @@ class MissionService:
             execution.hold_reason = None
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
             self._set_state(MissionState.RUNNING)
+            self._execution_started_unix_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
             return execution
 
@@ -425,6 +453,141 @@ class MissionService:
             AltitudeReference.HOME_RELATIVE,
         )
 
+    def _clear_revisit_locked(self) -> None:
+        self._revisit_commands = ()
+        self._revisit_ends = ()
+        self._revisit_index = 0
+        self._revisit_origin = None
+        self._revisit_climb_target = None
+        self._revisit_yaw_rad = None
+        self._revisit_yaw_requested_at_s = None
+        if self._current_execution is not None:
+            self._current_execution.active_revisit_candidate_id = None
+
+    async def revisit(self, execution_id: str, candidate_id: str) -> MissionExecution:
+        """Return to an authoritative capture-time aircraft position, never a map pin."""
+        async with self._action_lock:
+            self._raise_background_error_if_present()
+            execution = self._require_current_execution(execution_id)
+            if not ((execution.state == MissionState.RUNNING and
+                     execution.flight_activity == FlightActivity.SEARCHING) or
+                    (execution.state == MissionState.PAUSED and
+                     execution.flight_activity == FlightActivity.HOLDING)):
+                self._raise_action_not_allowed("revisit")
+            if (self._candidate_store is None or self._terrain_grid is None or
+                    not self._navigation_commands or execution.active_target is None):
+                self._raise_action_not_allowed("revisit")
+            if self._recovery_commands and self._route_departure_anchor is None:
+                self._raise_action_not_allowed("revisit")
+            try:
+                candidate = self._candidate_store.get(candidate_id)
+            except CandidateNotFound as exc:
+                raise MissionExecutionError(
+                    MissionExecutionErrorCode.MISSION_ACTION_NOT_ALLOWED,
+                    "The historical sighting does not exist in this session.",
+                    {"reason": "CANDIDATE_NOT_FOUND"},
+                ) from exc
+            if (candidate.status == "DISMISSED" or
+                    candidate.execution_id != execution_id or
+                    candidate.capture_viewpoint is None):
+                raise MissionExecutionError(
+                    MissionExecutionErrorCode.MISSION_ACTION_NOT_ALLOWED,
+                    "This sighting has no eligible stored viewpoint for this mission.",
+                    {"reason": "REVISIT_UNAVAILABLE"},
+                )
+            self._require_camera_ready()
+            vehicle = self._require_ready_vehicle()
+            status = vehicle.get_status()
+            if not status.armed or status.flight_mode not in ("GUIDED", "BRAKE"):
+                self._raise_action_not_allowed("revisit")
+            _, latest = await self._telemetry_hub.get_latest()
+            sample = self._validate_execution_telemetry(latest)
+            self._require_manual_telemetry(sample)
+            plan = self._require_current_plan(execution.plan_id)
+            desired_agl = plan.planning_settings.search_altitude_m
+            viewpoint = candidate.capture_viewpoint
+            try:
+                grid = self._terrain_grid
+                arrival_ground = grid.height_geo(viewpoint.latitude_deg, viewpoint.longitude_deg)
+                capture_agl = viewpoint.altitude_m - arrival_ground
+                if not 5.0 <= capture_agl <= 100.0:
+                    raise ValueError("Historical viewpoint is outside the safe altitude envelope")
+                arrival = Waypoint(
+                    viewpoint.latitude_deg, viewpoint.longitude_deg,
+                    max(viewpoint.altitude_m, arrival_ground + desired_agl + 1.0),
+                    AltitudeReference.HOME_RELATIVE,
+                )
+                departure = Waypoint(
+                    sample.latitude_deg, sample.longitude_deg, sample.relative_altitude_m,
+                    AltitudeReference.HOME_RELATIVE,
+                )
+                relocation = plan_terrain_relocation_chain(
+                    grid, departure, (arrival,), desired_agl,
+                    spacing_m=self._terrain_step_m,
+                )
+            except ValueError as exc:
+                raise self._terrain_error(exc) from exc
+
+            anchor = None
+            if self._route_departure_anchor is None:
+                anchor = RouteDepartureAnchor(
+                    position=departure,
+                    unfinished_target=execution.active_target,
+                    completed_count=len(execution.completed_targets),
+                )
+            # The same confirmation that protects manual takeover also protects
+            # the search-to-revisit transition. Search progress is frozen after BRAKE.
+            if not await self._brake_if_manual_mode_locked(vehicle):
+                self._raise_action_not_allowed("revisit")
+            self._last_guidance_target = None
+            self._last_guidance_sent_at = None
+            self._revisit_commands = relocation.commands
+            self._revisit_ends = relocation.segment_ends
+            self._revisit_origin = departure
+            self._revisit_index = 0
+            self._revisit_climb_target = relocation.climb_target
+            self._revisit_yaw_rad = viewpoint.yaw_rad
+            self._revisit_yaw_requested_at_s = None
+            try:
+                await self._call_vehicle(vehicle.set_guided())
+                await self._guide_revisit(vehicle, sample, force=True)
+            except (MissionExecutionError, ValueError) as exc:
+                try:
+                    if not await self._brake_if_manual_mode_locked(vehicle):
+                        self._raise_action_not_allowed("revisit")
+                finally:
+                    self._clear_revisit_locked()
+                execution.flight_activity = FlightActivity.HOLDING
+                execution.hold_reason = HoldReason.OPERATOR_PAUSE
+                self._set_state(MissionState.PAUSED)
+                if isinstance(exc, ValueError):
+                    raise self._terrain_error(exc) from exc
+                raise
+            if anchor is not None:
+                self._route_departure_anchor = anchor
+            execution.flight_activity = FlightActivity.REVISITING
+            execution.hold_reason = None
+            execution.active_revisit_candidate_id = candidate_id
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
+            self._set_state(MissionState.PAUSED)
+            return execution
+
+    async def cancel_revisit(self, execution_id: str) -> MissionExecution:
+        async with self._action_lock:
+            execution = self._require_current_execution(execution_id)
+            if (execution.state != MissionState.PAUSED or
+                    execution.flight_activity != FlightActivity.REVISITING):
+                self._raise_action_not_allowed("cancel_revisit")
+            if not await self._brake_if_manual_mode_locked(self._require_ready_vehicle()):
+                self._raise_action_not_allowed("cancel_revisit")
+            self._clear_revisit_locked()
+            execution.flight_activity = FlightActivity.HOLDING
+            execution.hold_reason = HoldReason.REVISIT_CANCELED
+            self._last_guidance_target = None
+            self._last_guidance_sent_at = None
+            self._publish_execution()
+            return execution
+
     def _require_manual_telemetry(self, sample: TelemetrySample) -> None:
         # The manual safety gate requires a tighter freshness window than route
         # planning; do not advertise readiness on a 2-3-second-old position.
@@ -448,7 +611,7 @@ class MissionService:
                 self._raise_action_not_allowed("take_controls")
             if execution.flight_activity not in (
                     FlightActivity.SEARCHING, FlightActivity.HOLDING,
-                    FlightActivity.REJOINING):
+                    FlightActivity.REJOINING, FlightActivity.REVISITING):
                 self._raise_action_not_allowed("take_controls")
             self._require_camera_ready()
             vehicle = self._require_ready_vehicle()
@@ -484,6 +647,7 @@ class MissionService:
             # BRAKE is confirmed before disabling search progress and before
             # declaring the handoff. Nothing sends manual velocity yet.
             await self._call_vehicle(vehicle.hold())
+            self._clear_revisit_locked()
             if departure is not None:
                 self._route_departure_anchor = departure
             self._last_guidance_target = None
@@ -901,6 +1065,7 @@ class MissionService:
 
         # wait for RTL confirmation before reporting RETURNING_HOME
         await self._call_vehicle(vehicle.return_to_launch())
+        self._clear_revisit_locked()
 
         execution.active_target = None
         execution.flight_activity = None
@@ -1063,6 +1228,7 @@ class MissionService:
             )
             execution.hold_reason = None
             self._set_state(MissionState.RUNNING)
+            self._execution_started_unix_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
             return execution
 
@@ -1275,6 +1441,7 @@ class MissionService:
                                         # to its own failsafe. Never send another
                                         # search target or BRAKE over that return.
                                         self._invalidate_manual_channel_locked()
+                                        self._clear_revisit_locked()
                                         execution.active_target = None
                                         execution.flight_activity = None
                                         execution.hold_reason = None
@@ -1291,6 +1458,8 @@ class MissionService:
                                 # drift while paused should never complete a waypoint
                                 if execution.state == MissionState.RUNNING:
                                     await self._handle_running_sample(execution, latest)
+                                elif execution.flight_activity == FlightActivity.REVISITING:
+                                    await self._handle_revisit_sample(execution, latest)
 
                             elif (
                                 execution.state == MissionState.RETURNING_HOME
@@ -1409,6 +1578,8 @@ class MissionService:
         self._recovery_index = 0
         self._preserve_resume_anchor = False
         self._route_departure_anchor = None
+        self._execution_started_unix_ms = None
+        self._clear_revisit_locked()
         self._recovery_climb_target = None
         self._terrain_launch_origin = None
         self._recovery_origin = None
@@ -1506,6 +1677,124 @@ class MissionService:
             self._recovery_index = min(next_index, end)
             self._active_target_sent_at_utc = datetime.now(timezone.utc)
         await self._send_terrain_guidance(vehicle, guidance, force=force)
+
+    async def _guide_revisit(
+        self, vehicle: VehicleControl, sample: TelemetrySample, force: bool = False,
+    ) -> None:
+        if not self._revisit_commands or not self._revisit_ends or self._revisit_origin is None:
+            raise ValueError("Historical viewpoint path is missing")
+        end = next((i for i in self._revisit_ends if i >= self._revisit_index), None)
+        if end is None:
+            raise ValueError("Historical viewpoint segment is missing")
+        prev_end = next((i for i in reversed(self._revisit_ends)
+                         if i < self._revisit_index), -1)
+        origin = self._revisit_commands[prev_end] if prev_end >= 0 else self._revisit_origin
+        guidance = terrain_lookahead_target(
+            self._terrain_grid, sample.latitude_deg, sample.longitude_deg, origin,
+            self._revisit_commands[prev_end + 1:end + 1], self._terrain_lookahead_m,
+        )
+        if guidance.cross_track_m > 8.0:
+            raise ValueError("Historical viewpoint route deviation exceeds 8 m")
+        next_index = prev_end + 1 + guidance.next_index
+        if next_index > self._revisit_index:
+            self._revisit_index = min(next_index, end)
+            self._active_target_sent_at_utc = datetime.now(timezone.utc)
+        await self._send_terrain_guidance(vehicle, guidance, force=force)
+
+    async def _handle_revisit_sample(
+        self, execution: MissionExecution, sample: TelemetrySample,
+    ) -> None:
+        grid = self._terrain_grid
+        vehicle = self._require_ready_vehicle()
+        if grid is None:
+            raise self._terrain_error(ValueError("Terrain data is unavailable"))
+        try:
+            agl = sample.relative_altitude_m - grid.height_geo(
+                sample.latitude_deg, sample.longitude_deg,
+            )
+            plan = self._require_current_plan(execution.plan_id)
+            climbing = (
+                self._revisit_climb_target is not None and self._revisit_origin is not None
+                and self._revisit_ends and self._revisit_index <= self._revisit_ends[0]
+                and geodesic_distance_m(
+                    GeoPoint(sample.latitude_deg, sample.longitude_deg),
+                    GeoPoint(self._revisit_origin.latitude_deg,
+                             self._revisit_origin.longitude_deg),
+                ) <= 1.5 and agl >= 5.0
+            )
+            if agl < plan.planning_settings.search_altitude_m - 5.0 and not climbing:
+                raise ValueError("Historical viewpoint terrain clearance is too low")
+            end = next((i for i in self._revisit_ends
+                        if i >= self._revisit_index), None)
+            if end is None:
+                raise ValueError("Historical viewpoint segment is missing")
+            if not self._terrain_target_reached(sample, self._revisit_commands[end]):
+                if self._revisit_yaw_requested_at_s is not None:
+                    # Maintain the yaw target if the aircraft drifts slightly
+                    # during the final turn; do not send position-only guidance.
+                    await self._call_vehicle(vehicle.point_at_viewpoint(
+                        self._revisit_commands[end], self._revisit_yaw_rad,
+                    ))
+                else:
+                    await self._guide_revisit(vehicle, sample)
+                return
+            remaining = tuple(i for i in self._revisit_ends if i > end)
+            if remaining:
+                if self._revisit_climb_target is not None and end == self._revisit_ends[0]:
+                    self._revisit_climb_target = None
+                self._revisit_index = end + 1
+                self._last_guidance_target = None
+                self._last_guidance_sent_at = None
+                await self._guide_revisit(vehicle, sample, force=True)
+            else:
+                # The final position alone does not reproduce the camera view.
+                # Command the saved capture-time yaw while holding the safe
+                # relocation altitude, then confirm the reported heading.
+                yaw_rad = self._revisit_yaw_rad
+                if yaw_rad is None:
+                    raise ValueError("Historical viewpoint heading is missing")
+                if self._revisit_yaw_requested_at_s is None:
+                    await self._call_vehicle(vehicle.point_at_viewpoint(
+                        self._revisit_commands[end], yaw_rad,
+                    ))
+                    self._revisit_yaw_requested_at_s = time.monotonic()
+                    return
+                requested_deg = math.degrees(yaw_rad) % 360.0
+                actual_deg = sample.heading_deg
+                aligned = (actual_deg is not None and math.isfinite(actual_deg) and
+                           abs((actual_deg - requested_deg + 180.0) % 360.0 - 180.0) <= 7.0)
+                if not aligned:
+                    if time.monotonic() - self._revisit_yaw_requested_at_s < 20.0:
+                        return
+                    if not await self._brake_if_manual_mode_locked(vehicle):
+                        return  # RTL/failsafe must retain priority.
+                    self._clear_revisit_locked()
+                    self._last_guidance_target = None
+                    self._last_guidance_sent_at = None
+                    execution.flight_activity = FlightActivity.HOLDING
+                    execution.hold_reason = None  # not an operator-requested pause
+                    self._publish_execution()
+                    raise MissionExecutionError(
+                        MissionExecutionErrorCode.MISSION_MONITOR_FAILED,
+                        "Historical viewpoint heading could not be restored.",
+                        {"reason": "REVISIT_HEADING_TIMEOUT"},
+                    )
+                if not await self._brake_if_manual_mode_locked(vehicle):
+                    return  # A native RTL or failsafe must never be overridden.
+                self._clear_revisit_locked()
+                self._last_guidance_target = None
+                self._last_guidance_sent_at = None
+                execution.flight_activity = FlightActivity.HOLDING
+                execution.hold_reason = HoldReason.REVISIT_ARRIVAL
+                self._publish_execution()
+        except ValueError as exc:
+            if not await self._brake_if_manual_mode_locked(vehicle):
+                raise self._terrain_error(exc) from exc
+            self._clear_revisit_locked()
+            execution.flight_activity = FlightActivity.HOLDING
+            execution.hold_reason = HoldReason.OPERATOR_PAUSE
+            self._publish_execution()
+            raise self._terrain_error(exc) from exc
 
     async def _guide_search(
         self, execution: MissionExecution, sample: TelemetrySample,

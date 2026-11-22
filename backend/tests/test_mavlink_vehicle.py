@@ -1,4 +1,5 @@
 import asyncio
+import math
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from app.vehicle.errors import VehicleCommandError
 from app.vehicle.mavlink_vehicle import (
     MavlinkVehicle,
     POSITION_ONLY_TYPE_MASK,
+    POSITION_YAW_TYPE_MASK,
     VELOCITY_YAW_RATE_TYPE_MASK,
 )
 
@@ -456,6 +458,35 @@ async def test_go_to_sends_guided_position_target() -> None:
     assert call[5] == 302674000
     assert call[6] == -977430000
     assert call[7] == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_viewpoint_heading_uses_absolute_yaw_with_position_hold() -> None:
+    vehicle, connection, _ = make_vehicle()
+    await vehicle._dispatch_message(FakeHeartbeat("GUIDED", armed=True))
+    target = Waypoint(30.2674, -97.7430, 18.0, AltitudeReference.HOME_RELATIVE)
+    await vehicle.point_at_viewpoint(target, math.radians(359))
+    assert len(connection.mav.position_target_calls) == 1
+    call = connection.mav.position_target_calls[0]
+    assert call[3] == MAVLINK.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    assert call[4] == POSITION_YAW_TYPE_MASK
+    assert call[4] & (1 << 10) == 0  # yaw supplied, not ignored
+    assert call[4] & (1 << 11) != 0  # yaw rate ignored
+    assert call[5:8] == (302674000, -977430000, 18.0)
+    assert call[14] == pytest.approx(math.radians(359))
+    assert call[15] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_viewpoint_heading_requires_guided_and_finite_target() -> None:
+    vehicle, connection, _ = make_vehicle()
+    target = Waypoint(30.2674, -97.7430, 18.0, AltitudeReference.HOME_RELATIVE)
+    with pytest.raises(ValueError):
+        await vehicle.point_at_viewpoint(target, float('nan'))
+    await vehicle._dispatch_message(FakeHeartbeat("BRAKE", armed=True))
+    with pytest.raises(VehicleCommandError, match="GUIDED"):
+        await vehicle.point_at_viewpoint(target, 0.0)
+    assert not connection.mav.position_target_calls
 
 
 @pytest.mark.asyncio

@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 import logging
 import math
 
-from app.domain.models.detection import PixelBoundingBox
+from app.domain.models.detection import CaptureViewpoint, EstimatedPersonLocation, PixelBoundingBox
 from app.vision.camera_frame import CapturedFrame
 from app.vision.candidate_store import CandidateCaptureMetadata, CandidateStore
 from app.vision.overlay import annotate_live_frame
@@ -80,6 +81,7 @@ class CandidatePublisher:
         grace_s: float = 2.0, min_observations: int = 2,
         max_active_encounters: int = 256,
         localizer: PersonLocalizer | None = None,
+        execution_at_capture: Callable[[int], str | None] | None = None,
     ) -> None:
         if not math.isfinite(confirmation_s) or confirmation_s <= 0:
             raise ValueError("confirmation_s must be finite and positive")
@@ -89,6 +91,7 @@ class CandidatePublisher:
             raise ValueError("invalid encounter limits")
         self.store = store
         self.localizer = localizer
+        self.execution_at_capture = execution_at_capture
         self.confirmation_ms = round(confirmation_s * 1000)
         self.grace_ms = round(grace_s * 1000)
         self.min_observations = min_observations
@@ -223,6 +226,22 @@ class CandidatePublisher:
                 continue
             frame = encounter.best_frame
             box = encounter.best_box
+            # Freeze pose from the selected SOURCE frame before asynchronous JPEG encoding.
+            # The pose at publication time can be in a different part of the search.
+            history = getattr(self.localizer, "history", None)
+            geometry = getattr(self.localizer, "geometry", None)
+            source_matches = (geometry is None or (
+                frame.source_id == geometry.source_id
+                and frame.horizontal_fov_rad is not None
+                and abs(frame.horizontal_fov_rad - geometry.horizontal_fov_rad) <= .002
+            ))
+            pose = (history.at_capture(frame.capture_unix_ms)
+                    if history is not None and source_matches else None)
+            viewpoint = (CaptureViewpoint(pose.latitude_deg, pose.longitude_deg,
+                                         pose.relative_altitude_m, pose.yaw_rad)
+                         if pose is not None else None)
+            execution_id = (self.execution_at_capture(frame.capture_unix_ms)
+                            if self.execution_at_capture is not None else None)
             # Offload encoding so WebSocket, camera receive and flight remain responsive.
             snapshot = await asyncio.to_thread(annotate_live_frame, frame.jpeg_bytes, (box,))
             metadata = CandidateCaptureMetadata(
@@ -243,14 +262,19 @@ class CandidatePublisher:
             except Exception:
                 LOG.exception("Candidate geolocation failed; publishing the candidate with null location")
                 location = None
+            if location is None and viewpoint is not None:
+                location = EstimatedPersonLocation(
+                    viewpoint.latitude_deg, viewpoint.longitude_deg,
+                    "CAMERA_POSITION_FALLBACK", "CAMERA_POSITION_ONLY",
+                )
             candidate = self.store.publish(
                 first_observed_at=_source_time(encounter.first_ms),
                 captured_at=_source_time(frame.capture_unix_ms),
                 confidence=box.confidence,
                 bounding_box=bounding_box,
                 snapshot_jpeg=snapshot,
-                capture_metadata=metadata,
-                estimated_location=location,
+                capture_metadata=metadata, capture_viewpoint=viewpoint,
+                execution_id=execution_id, estimated_location=location,
             )
             encounter.candidate_id = candidate.candidate_id
 

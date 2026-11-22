@@ -1,5 +1,6 @@
 """Domain concepts for a frozen, reviewable person-sighting candidate."""
 from dataclasses import dataclass
+import math
 from datetime import datetime
 from typing import Literal
 
@@ -50,6 +51,22 @@ class EstimatedPersonLocation:
             raise ValueError("location method and quality disagree")
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureViewpoint:
+    """Historical aircraft position and heading from the selected camera frame."""
+    latitude_deg: float
+    longitude_deg: float
+    altitude_m: float
+    yaw_rad: float
+
+    def __post_init__(self) -> None:
+        if not all(math.isfinite(v) for v in (
+            self.latitude_deg, self.longitude_deg, self.altitude_m, self.yaw_rad,
+        )) or not (-90 <= self.latitude_deg <= 90 and -180 <= self.longitude_deg <= 180
+                  and 0 < self.altitude_m <= 500):
+            raise ValueError("invalid historical aircraft viewpoint")
+
+
 @dataclass(frozen=True)
 class DetectionCandidate:
     candidate_id: str
@@ -64,3 +81,4 @@ class DetectionCandidate:
     bounding_box: PixelBoundingBox
     estimated_location: EstimatedPersonLocation | None
     snapshot_url: str
+    capture_viewpoint: CaptureViewpoint | None = None
