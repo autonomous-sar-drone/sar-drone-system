@@ -32,9 +32,17 @@ class FakeTelemetryHub:
 class FakeMav:
     def __init__(self) -> None:
         self.command_long_calls: list[tuple[Any, ...]] = []
+        self.param_set_calls: list[tuple[Any, ...]] = []
+        self.param_read_calls: list[tuple[Any, ...]] = []
         self.position_target_calls: list[
             tuple[Any, ...]
         ] = []
+
+    def param_set_send(self, *args: Any) -> None:
+        self.param_set_calls.append(args)
+
+    def param_request_read_send(self, *args: Any) -> None:
+        self.param_read_calls.append(args)
 
     def command_long_send(
         self,
@@ -534,3 +542,74 @@ async def test_rtl_waits_for_vehicle_mode_confirmation() -> None:
     await rtl_task
 
     assert vehicle.get_status().flight_mode == "RTL"
+
+class FakeParamValue:
+    def __init__(self, name: str, value: float, system: int = 1, component: int = 1):
+        self.param_id = name
+        self.param_value = value
+        self.system = system
+        self.component = component
+
+    def get_type(self) -> str:
+        return "PARAM_VALUE"
+
+    def get_srcSystem(self) -> int:
+        return self.system
+
+    def get_srcComponent(self) -> int:
+        return self.component
+
+
+@pytest.mark.asyncio
+async def test_rtl_parameters_are_written_and_read_back_before_flight():
+    from datetime import datetime, timezone
+    vehicle, connection, _ = make_vehicle()
+    vehicle._last_heartbeat_utc = datetime.now(timezone.utc)
+    task = asyncio.create_task(vehicle.configure_safe_rtl(50))
+    for i, (name, value) in enumerate((
+        ("RTL_ALT_M", 50.0),
+        ("RTL_ALT_TYPE", 0.0),
+        ("RTL_CONE_SLOPE", 0.0),
+    )):
+        async def wait_for_set():
+            while len(connection.mav.param_set_calls) < i + 1:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_set(), 0.5)
+        assert connection.mav.param_set_calls[i][2] == name.encode()
+        await vehicle._dispatch_message(FakeParamValue(name, value))
+        async def wait_for_read():
+            while len(connection.mav.param_read_calls) < i + 1:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_for_read(), 0.5)
+        assert connection.mav.param_read_calls[i][2] == name.encode()
+        await vehicle._dispatch_message(FakeParamValue(name, value))
+    await task
+    assert len(connection.mav.param_set_calls) == 3
+    assert len(connection.mav.param_read_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_rtl_configuration_rejects_parameter_disagreement():
+    from datetime import datetime, timezone
+    vehicle, connection, _ = make_vehicle()
+    vehicle._last_heartbeat_utc = datetime.now(timezone.utc)
+    task = asyncio.create_task(vehicle.configure_safe_rtl(50))
+    async def wait_for_set():
+        while not connection.mav.param_set_calls:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(wait_for_set(), 0.5)
+    await vehicle._dispatch_message(FakeParamValue("RTL_ALT_M", 15))
+    with pytest.raises(VehicleCommandError, match="verification failed"):
+        await task
+    assert len(connection.mav.param_read_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_rtl_parameters_are_not_changed_while_armed():
+    from datetime import datetime, timezone
+    vehicle, connection, _ = make_vehicle()
+    vehicle._last_heartbeat_utc = datetime.now(timezone.utc)
+    vehicle._armed = True
+    with pytest.raises(VehicleCommandError, match="while armed"):
+        await vehicle.configure_safe_rtl(50)
+    assert connection.mav.param_set_calls == []

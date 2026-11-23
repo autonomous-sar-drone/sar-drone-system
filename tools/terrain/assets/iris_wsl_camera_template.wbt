@@ -1,0 +1,88 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/road/protos/StraightRoadSegment.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Grass.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/advertising_board/protos/AdvertisingBoard.proto"
+EXTERNPROTO "../protos/Iris.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/humans/pedestrian/protos/Pedestrian.proto"
+
+WorldInfo {
+  title "Iris Ardupilot"
+  basicTimeStep 2
+  FPS 20
+}
+Viewpoint {
+  orientation 0.14171802029368655 -0.19502169386003032 -0.9705063326161261 4.997768707865118
+  position 27.294296634277018 -11.213559613684446 3.6847886099577125
+  follow "Iris"
+  followSmoothness 0.01
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Floor {
+  size 300 100
+  appearance Grass {
+  }
+}
+Pedestrian {
+}
+AdvertisingBoard {
+  translation 13.1012 17.8267 0
+  rotation 0 0 1 -1.469
+  frontTexture [
+    "../../../../../Tools/autotest/web-firmware/images/logo.png"
+  ]
+  backTexture [
+    "../../../../../Tools/autotest/web-firmware/images/logo.png"
+  ]
+  displayWidth 16.28
+  displayHeight 6
+  poleNumber 2
+  poleType "H-shape"
+  poleHeight 10
+}
+StraightRoadSegment {
+  translation -15 0.3 0.02
+  rotation 0 0 1 0.105
+  width 16.5
+  rightBorder FALSE
+  leftBorder FALSE
+  length 140
+}
+Iris {
+  hidden linearVelocity_0 -1.3479577591397549e-19 1.2588141009663366e-18 1.006700815199905e-15
+  hidden angularVelocity_0 -1.0375442989797292e-18 -4.499466006462642e-18 -5.867437753721854e-19
+  translation 29.98748312109109 0.003269319017497043 0.05496321249999999
+  rotation 8.920987445125986e-16 8.841287118238322e-16 1 0.002005335481600753
+  controller "ardupilot_vehicle_controller"
+  controllerArgs [
+    "--motors"
+    "m1_motor, m2_motor, m3_motor, m4_motor"
+    "--sitl-address"
+    "172.21.251.139"
+    "--camera"
+    "sar_camera"
+    "--camera-fps"
+    "10"
+    "--sar-camera-host"
+    "127.0.0.1"
+    "--sar-camera-port"
+    "8766"
+  ]
+  extensionSlot [
+    Camera {
+      translation 0.32 0 0.05
+      rotation 0 1 0 1.04719755
+      name "sar_camera"
+      fieldOfView 1.1
+      width 640
+      height 360
+      near 0.05
+    }
+  ]
+}

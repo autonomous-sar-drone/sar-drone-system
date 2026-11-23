@@ -1,0 +1,7 @@
+# Generated environments and downloaded DEMs should stay developer-local.
+generated/
+*.download
+*.tif
+*.tiff
+__pycache__/
+.pytest_cache/

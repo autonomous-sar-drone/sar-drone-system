@@ -1,0 +1,12 @@
+{
+  "scenario_id": "manor_prairie",
+  "latitude_deg": 30.3678,
+  "longitude_deg": -97.5396,
+  "width_m": 320.0,
+  "height_m": 320.0,
+  "grid_spacing_m": 4.0,
+  "tree_count": 14,
+  "pedestrian_north_m": 48.0,
+  "pedestrian_west_m": 0.0,
+  "random_seed": 4380
+}
