@@ -27,6 +27,7 @@ class FakeVehicle:
         self.takeoff_calls: list[float] = []
         self.go_to_calls: list[Waypoint] = []
         self.hold_calls = 0
+        self.viewpoint_heading_calls: list[tuple[Waypoint, float]] = []
         self.rtl_calls = 0
 
         self.fail_guided = False
@@ -57,6 +58,9 @@ class FakeVehicle:
 
     async def go_to(self, target: Waypoint) -> None:
         self.go_to_calls.append(target)
+
+    async def point_at_viewpoint(self, target: Waypoint, yaw_rad: float) -> None:
+        self.viewpoint_heading_calls.append((target, yaw_rad))
 
     async def hold(self) -> None:
         self.hold_calls += 1

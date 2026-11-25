@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
 from app.api.schemas.mission_execution import (
     CommenceMissionRequest,
@@ -10,6 +11,10 @@ from app.mission.mission_service import MissionService
 
 
 router = APIRouter(prefix="/api/missions", tags=["missions"])
+
+
+class RevisitRequest(BaseModel):
+    candidate_id: str = Field(min_length=1, validation_alias="candidateId")
 
 
 def _camel_case_key(key: str) -> str:
@@ -83,6 +88,42 @@ async def continue_mission(
 ) -> MissionExecutionResponse:
     try:
         execution = await _service(request).continue_mission(execution_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/take-controls", response_model=MissionExecutionResponse)
+async def take_controls(execution_id: str, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).take_controls(execution_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/give-controls", response_model=MissionExecutionResponse)
+async def give_controls(execution_id: str, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).give_controls(execution_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/revisit", response_model=MissionExecutionResponse)
+async def revisit(execution_id: str, payload: RevisitRequest, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).revisit(execution_id, payload.candidate_id)
+    except MissionExecutionError as error:
+        raise _http_error(error) from error
+    return mission_execution_response_from_domain(execution)
+
+
+@router.post("/{execution_id}/cancel-revisit", response_model=MissionExecutionResponse)
+async def cancel_revisit(execution_id: str, request: Request) -> MissionExecutionResponse:
+    try:
+        execution = await _service(request).cancel_revisit(execution_id)
     except MissionExecutionError as error:
         raise _http_error(error) from error
     return mission_execution_response_from_domain(execution)

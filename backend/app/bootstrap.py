@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         landing_altitude_tolerance_m=LANDING_ALTITUDE_TOLERANCE_M,
         landing_speed_tolerance_mps=LANDING_SPEED_TOLERANCE_MPS,
         camera_available=vision_runtime.camera_ready,
+        candidate_store=candidate_store,
         terrain_grid=app.state.terrain_grid,
         terrain_step_m=SAR_TERRAIN_WAYPOINT_SPACING_M,
         terrain_lookahead_m=SAR_TERRAIN_LOOKAHEAD_M,
@@ -120,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             SAR_RTL_MIN_CLEARANCE_M, SAR_RTL_TERRAIN_MARGIN_M,
         ),
     )
+    candidate_publisher.execution_at_capture = mission_service.execution_id_at_capture
     camera_watchdog = CameraSafetyWatchdog(
         vision_runtime, mission_service,
         outage_after_s=CAMERA_RTL_OUTAGE_S,

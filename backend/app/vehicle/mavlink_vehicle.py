@@ -18,6 +18,10 @@ from app.vehicle.pose_history import PoseHistory
 # the position target message has several optional controls
 # this mask uses only latitude, longitude, and altitude
 POSITION_ONLY_TYPE_MASK = 0b110111111000
+# keep position active but allow an explicit absolute yaw at the viewpoint
+POSITION_YAW_TYPE_MASK = POSITION_ONLY_TYPE_MASK & ~(1 << 10)
+# ignore position, acceleration, and absolute yaw; send velocity + yaw rate
+VELOCITY_YAW_RATE_TYPE_MASK = 0b010111000111
 LOG = logging.getLogger(__name__)
 
 
@@ -234,6 +238,76 @@ class MavlinkVehicle:
             0.0,  # yaw ignored by type mask
             0.0,  # yaw rate ignored by type mask
         )
+
+    async def point_at_viewpoint(self, target: Waypoint, yaw_rad: float) -> None:
+        """Keep the saved camera position while restoring its aircraft heading."""
+        if target.altitude_reference != AltitudeReference.HOME_RELATIVE:
+            raise ValueError("Viewpoint target must be HOME_RELATIVE")
+        if not math.isfinite(yaw_rad):
+            raise ValueError("Viewpoint heading must be finite")
+        async with self._command_lock:
+            self._ensure_connected()
+            if not self._armed or self._flight_mode != "GUIDED":
+                raise VehicleCommandError("Vehicle must be armed in GUIDED mode")
+            mavlink = _get_mavlink()
+            self._connection.mav.set_position_target_global_int_send(
+                0,
+                self._connection.target_system,
+                self._connection.target_component,
+                mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                POSITION_YAW_TYPE_MASK,
+                int(round(target.latitude_deg * 1e7)),
+                int(round(target.longitude_deg * 1e7)),
+                target.altitude_m,
+                0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                yaw_rad % (2.0 * math.pi),
+                0.0,
+            )
+
+    async def send_manual_velocity(
+        self,
+        forward_mps: float,
+        right_mps: float,
+        up_mps: float,
+        yaw_rate_deg_s: float,
+    ) -> None:
+        # controls are body-heading-relative; MAVLink's vertical velocity is down
+        values = (forward_mps, right_mps, up_mps, yaw_rate_deg_s)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Manual velocity and yaw rate must be finite")
+        # Final vehicle-level bounds protect against accidentally bypassing the
+        # higher-level manual-input safety gate. Do not silently clamp a bad caller.
+        if (math.hypot(forward_mps, right_mps) > 2.0 + 1e-6
+                or abs(up_mps) > 0.75 + 1e-6
+                or abs(yaw_rate_deg_s) > 20.0 + 1e-6):
+            raise ValueError("Manual velocity exceeds speed or yaw-rate limits")
+
+        # serialize with mode changes, and check the confirmed mode before sending
+        async with self._command_lock:
+            self._ensure_connected()
+            if not self._armed:
+                raise VehicleCommandError("Vehicle must be armed for manual movement")
+            if self._flight_mode != "GUIDED":
+                raise VehicleCommandError(
+                    "Vehicle must be in GUIDED mode for manual movement"
+                )
+
+            mavlink = _get_mavlink()
+            self._connection.mav.set_position_target_local_ned_send(
+                0,
+                self._connection.target_system,
+                self._connection.target_component,
+                mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_YAW_RATE_TYPE_MASK,
+                0.0, 0.0, 0.0,
+                float(forward_mps),
+                float(right_mps),
+                -float(up_mps),
+                0.0, 0.0, 0.0,
+                0.0,
+                math.radians(yaw_rate_deg_s),
+            )
 
     async def hold(self) -> None:
         # BRAKE holds position without needing pilot throttle input

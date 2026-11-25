@@ -1,5 +1,5 @@
 from app.domain.models.mission_execution import MissionExecution
-from app.domain.models.mission_state import MissionState
+from app.domain.models.mission_state import FlightActivity, HoldReason, MissionState
 from app.domain.models.route import AltitudeReference, Waypoint
 from app.runtime.mission_hub import MissionHub
 
@@ -77,3 +77,51 @@ def test_runtime_error_is_copied_in_snapshots_and_available_on_reconnect() -> No
         "details": {"reason": "UNEXPECTED_DISARM"},
     }
     hub.unsubscribe(queue)
+
+
+def test_flight_activity_snapshot_is_immutable_across_changes_and_reconnect() -> None:
+    hub = MissionHub()
+    queue, _ = hub.subscribe()
+    execution = MissionExecution(
+        execution_id="exe", plan_id="plan", state=MissionState.PAUSED,
+        flight_activity=FlightActivity.MANUAL_CONTROL, manual_control_ready=True,
+    )
+    hub.publish(execution)
+    execution.flight_activity = FlightActivity.HOLDING
+    execution.hold_reason = HoldReason.MANUAL_RELEASE
+    execution.manual_control_ready = False
+    hub.publish(execution)
+
+    first = queue.get_nowait()
+    second = queue.get_nowait()
+    assert (first.flight_activity, first.hold_reason, first.manual_control_ready) == (
+        FlightActivity.MANUAL_CONTROL, None, True,
+    )
+    assert (second.flight_activity, second.hold_reason, second.manual_control_ready) == (
+        FlightActivity.HOLDING, HoldReason.MANUAL_RELEASE, False,
+    )
+    reconnect_queue, latest = hub.subscribe()
+    assert latest == second
+    hub.unsubscribe(queue)
+    hub.unsubscribe(reconnect_queue)
+
+
+def test_flight_activity_event_fields_use_frontend_aliases() -> None:
+    from app.api.schemas.mission_execution import mission_update_event_from_snapshot
+
+    hub = MissionHub()
+    execution = MissionExecution(
+        execution_id="exe", plan_id="plan", state=MissionState.PAUSED,
+        flight_activity=FlightActivity.REVISITING,
+        active_revisit_candidate_id="candidate-2",
+    )
+    hub.publish(execution)
+    _, latest = hub.subscribe()
+    assert latest is not None
+    payload = mission_update_event_from_snapshot(latest).model_dump(
+        by_alias=True, mode="json", exclude_none=True,
+    )["data"]
+    assert payload["flightActivity"] == "REVISITING"
+    assert payload["activeRevisitCandidateId"] == "candidate-2"
+    assert payload["manualControlReady"] is False
+    assert "holdReason" not in payload
