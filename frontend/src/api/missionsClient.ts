@@ -8,12 +8,19 @@
  */
 import type {
   ActiveTarget,
+  FlightActivity,
+  HoldReason,
   InterruptionReason,
   MissionError,
   MissionExecution,
   MissionState,
 } from '../types/mission';
-import { INTERRUPTION_REASONS, MISSION_STATES } from '../types/mission';
+import {
+  FLIGHT_ACTIVITIES,
+  HOLD_REASONS,
+  INTERRUPTION_REASONS,
+  MISSION_STATES,
+} from '../types/mission';
 
 export type MissionResult =
   | { ok: true; execution: MissionExecution }
@@ -34,6 +41,26 @@ function parseActiveTarget(raw: unknown): ActiveTarget | null {
   };
 }
 
+/**
+ * PHASE 2 fields, read leniently on purpose.
+ *
+ * An absent field means a Phase 1 backend and an unrecognized value means a backend
+ * newer than this build. Both resolve to null rather than failing the whole
+ * execution: losing Phase 2 actions is recoverable, but rejecting the payload would
+ * blank the mission panel and take the existing controls down with it.
+ */
+export function parseFlightActivity(raw: unknown): FlightActivity | null {
+  return typeof raw === 'string' && FLIGHT_ACTIVITIES.includes(raw as FlightActivity)
+    ? (raw as FlightActivity)
+    : null;
+}
+
+export function parseHoldReason(raw: unknown): HoldReason | null {
+  return typeof raw === 'string' && HOLD_REASONS.includes(raw as HoldReason)
+    ? (raw as HoldReason)
+    : null;
+}
+
 export function parseExecution(raw: unknown): MissionExecution | null {
   if (!isObj(raw)) return null;
   if (typeof raw.executionId !== 'string' || typeof raw.planId !== 'string') return null;
@@ -52,6 +79,15 @@ export function parseExecution(raw: unknown): MissionExecution | null {
       INTERRUPTION_REASONS.includes(raw.interruptionReason as InterruptionReason)
         ? (raw.interruptionReason as InterruptionReason)
         : null,
+    flightActivity: parseFlightActivity(raw.flightActivity),
+    holdReason: parseHoldReason(raw.holdReason),
+    activeRevisitCandidateId:
+      typeof raw.activeRevisitCandidateId === 'string' && raw.activeRevisitCandidateId !== ''
+        ? raw.activeRevisitCandidateId
+        : null,
+    // Anything other than an explicit true is treated as not ready. Manual flight is
+    // the one action that moves the aircraft by hand, so it stays off by default.
+    manualControlReady: raw.manualControlReady === true,
   };
 }
 
@@ -141,4 +177,60 @@ export function continueMission(
   options: CallOptions = {},
 ): Promise<MissionResult> {
   return post(`/api/missions/${encodeURIComponent(executionId)}/continue`, undefined, options);
+}
+
+/*
+ * PHASE 2 routes (PROPOSED; mockable). Same MissionExecution body and the same
+ * 409 { detail: { code, message, details } } envelope as every route above, so
+ * they reuse post() and need no error handling of their own.
+ */
+
+/** Request manual ownership. The backend decides; readiness arrives on the next update. */
+export function takeControls(
+  executionId: string,
+  options: CallOptions = {},
+): Promise<MissionResult> {
+  return post(`/api/missions/${encodeURIComponent(executionId)}/take-controls`, undefined, options);
+}
+
+/** Hand control back. Neutral hover / HOLDING only; never resumes the search. */
+export function giveControls(
+  executionId: string,
+  options: CallOptions = {},
+): Promise<MissionResult> {
+  return post(`/api/missions/${encodeURIComponent(executionId)}/give-controls`, undefined, options);
+}
+
+/**
+ * Fly back to the stored capture viewpoint for one candidate.
+ *
+ * Sends the candidate id and nothing else, on purpose. The destination is the
+ * historical DRONE/CAMERA pose the backend recorded at capture time, which is not
+ * the same place as the estimated person location, and is not what the map marker
+ * sits on. Sending coordinates from here would let the console steer the aircraft
+ * to a point it inferred, which is exactly the failure the fallback rule exists to
+ * prevent.
+ */
+export function revisitDetection(
+  executionId: string,
+  candidateId: string,
+  options: CallOptions = {},
+): Promise<MissionResult> {
+  return post(
+    `/api/missions/${encodeURIComponent(executionId)}/revisit`,
+    { candidateId },
+    options,
+  );
+}
+
+/** Stop a revisit relocation and hold. Never automatically resumes the search. */
+export function cancelRevisit(
+  executionId: string,
+  options: CallOptions = {},
+): Promise<MissionResult> {
+  return post(
+    `/api/missions/${encodeURIComponent(executionId)}/cancel-revisit`,
+    undefined,
+    options,
+  );
 }

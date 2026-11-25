@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  cancelRevisit,
   commenceMission,
   continueMission,
+  giveControls,
   parseExecution,
   parseMissionError,
   pauseMission,
   resumeMission,
+  revisitDetection,
   stopMission,
+  takeControls,
 } from './missionsClient';
 
 const EXECUTION = {
@@ -142,5 +146,145 @@ describe('parseExecution interruptionReason', () => {
   it('is null when absent or unrecognized', () => {
     expect(parseExecution(EXECUTION)?.interruptionReason).toBeNull();
     expect(parseExecution({ ...EXECUTION, interruptionReason: 'NOPE' })?.interruptionReason).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ PHASE 2 */
+
+describe('parseExecution with the Phase 2 fields', () => {
+  it('reads activity, hold reason, revisit target and readiness', () => {
+    const parsed = parseExecution({
+      ...EXECUTION,
+      missionState: 'PAUSED',
+      flightActivity: 'REVISITING',
+      holdReason: 'REVISIT_ARRIVAL',
+      activeRevisitCandidateId: 'cand-4',
+      manualControlReady: true,
+    });
+    expect(parsed?.flightActivity).toBe('REVISITING');
+    expect(parsed?.holdReason).toBe('REVISIT_ARRIVAL');
+    expect(parsed?.activeRevisitCandidateId).toBe('cand-4');
+    expect(parsed?.manualControlReady).toBe(true);
+  });
+
+  it('reads a backend that has none of them without failing', () => {
+    // A Phase 1 backend must keep working. Losing the Phase 2 actions is fine;
+    // blanking the mission panel is not.
+    const parsed = parseExecution(EXECUTION);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.missionState).toBe('RUNNING');
+    expect(parsed?.flightActivity).toBeNull();
+    expect(parsed?.holdReason).toBeNull();
+    expect(parsed?.activeRevisitCandidateId).toBeNull();
+    expect(parsed?.manualControlReady).toBe(false);
+  });
+
+  it('ignores values it does not recognize rather than rejecting the execution', () => {
+    const parsed = parseExecution({
+      ...EXECUTION,
+      flightActivity: 'ORBITING',
+      holdReason: 'SOMETHING_NEW',
+    });
+    expect(parsed?.missionState).toBe('RUNNING');
+    expect(parsed?.flightActivity).toBeNull();
+    expect(parsed?.holdReason).toBeNull();
+  });
+
+  it('treats anything other than true as not ready for manual flight', () => {
+    for (const value of ['true', 1, {}, null, undefined]) {
+      expect(parseExecution({ ...EXECUTION, manualControlReady: value })?.manualControlReady).toBe(false);
+    }
+  });
+
+  it('treats an empty revisit id as no revisit', () => {
+    expect(parseExecution({ ...EXECUTION, activeRevisitCandidateId: '' })?.activeRevisitCandidateId).toBeNull();
+  });
+});
+
+describe('Phase 2 routes', () => {
+  function capture(body: unknown = EXECUTION, status = 200) {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(body, status));
+    return { fetchImpl, call: () => fetchImpl.mock.calls[0] as [string, RequestInit] };
+  }
+
+  it('posts take-controls to the execution', async () => {
+    const { fetchImpl, call } = capture();
+    await takeControls('exec-1', { fetchImpl });
+    const [url, init] = call();
+    expect(url).toBe('/api/missions/exec-1/take-controls');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeUndefined();
+  });
+
+  it('posts give-controls to the execution', async () => {
+    const { fetchImpl, call } = capture();
+    await giveControls('exec-1', { fetchImpl });
+    expect(call()[0]).toBe('/api/missions/exec-1/give-controls');
+  });
+
+  it('posts cancel-revisit to the execution', async () => {
+    const { fetchImpl, call } = capture();
+    await cancelRevisit('exec-1', { fetchImpl });
+    expect(call()[0]).toBe('/api/missions/exec-1/cancel-revisit');
+  });
+
+  it('sends only the candidate id when revisiting', async () => {
+    // The destination is the backend's stored capture pose. Sending a coordinate
+    // from here would let the console steer the aircraft to a point it inferred.
+    const { fetchImpl, call } = capture();
+    await revisitDetection('exec-1', 'cand-4', { fetchImpl });
+    const [url, init] = call();
+    expect(url).toBe('/api/missions/exec-1/revisit');
+    expect(JSON.parse(init.body as string)).toEqual({ candidateId: 'cand-4' });
+  });
+
+  it('carries no latitude or longitude on any Phase 2 request', async () => {
+    for (const run of [
+      (f: typeof fetch) => takeControls('exec-1', { fetchImpl: f }),
+      (f: typeof fetch) => giveControls('exec-1', { fetchImpl: f }),
+      (f: typeof fetch) => cancelRevisit('exec-1', { fetchImpl: f }),
+      (f: typeof fetch) => revisitDetection('exec-1', 'cand-4', { fetchImpl: f }),
+    ]) {
+      const { fetchImpl, call } = capture();
+      await run(fetchImpl as unknown as typeof fetch);
+      const body = String(call()[1].body ?? '');
+      expect(body).not.toMatch(/latitude|longitude|lat|lng/i);
+    }
+  });
+
+  it('escapes ids in the path', async () => {
+    const { fetchImpl, call } = capture();
+    await revisitDetection('exec/1', 'cand 4', { fetchImpl });
+    expect(call()[0]).toBe('/api/missions/exec%2F1/revisit');
+    expect(JSON.parse(call()[1].body as string)).toEqual({ candidateId: 'cand 4' });
+  });
+
+  it('reuses the shared 409 envelope', async () => {
+    const { fetchImpl } = capture(
+      { detail: { code: 'MISSION_ACTION_NOT_ALLOWED', message: 'Not while returning home.', details: { state: 'RETURNING_HOME' } } },
+      409,
+    );
+    const result = await takeControls('exec-1', { fetchImpl });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('MISSION_ACTION_NOT_ALLOWED');
+      expect(result.error.message).toBe('Not while returning home.');
+      expect(result.error.details).toEqual({ state: 'RETURNING_HOME' });
+    }
+  });
+
+  it('returns the updated execution with its activity fields', async () => {
+    const { fetchImpl } = capture({
+      ...EXECUTION,
+      missionState: 'PAUSED',
+      flightActivity: 'MANUAL_CONTROL',
+      manualControlReady: true,
+    });
+    const result = await takeControls('exec-1', { fetchImpl });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.execution.flightActivity).toBe('MANUAL_CONTROL');
+      expect(result.execution.manualControlReady).toBe(true);
+    }
   });
 });

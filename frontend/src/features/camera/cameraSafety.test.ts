@@ -30,6 +30,10 @@ function mission(
     activeTarget: null,
     interruptionReason,
     runtimeError,
+    flightActivity: null,
+    holdReason: null,
+    activeRevisitCandidateId: null,
+    manualControlReady: false,
     timestamp: '2026-11-07T15:00:00.000Z',
   };
 }

@@ -36,6 +36,8 @@ function candidate(
         }
       : null,
     snapshotUrl: '/api/detections/cand-1/snapshot',
+    revisitAvailable: false,
+    revisitUnavailableReason: null,
     ...overrides,
   };
 }
